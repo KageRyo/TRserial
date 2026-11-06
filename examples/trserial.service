@@ -1,0 +1,15 @@
+[Unit]
+Description=TRserial local redemption queue
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/trserial daemon
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=15
+UMask=0077
+
+[Install]
+WantedBy=graphical-session.target

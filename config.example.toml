@@ -1,0 +1,18 @@
+# 複製到 trserial init 顯示的 config.toml，或用 --config 指定。
+# 密碼由作業系統憑證庫提供。
+webdriver_url = "http://127.0.0.1:9515"
+# browser_binary = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+headless = false
+# 帳號依序處理，每筆間隔 5 秒。
+delay_seconds = 5
+timeout_seconds = 30
+verification_timeout_seconds = 300
+# 只有送出前的暫時錯誤可自動重試，等待 10、20 秒後重試。
+max_attempts = 3
+retry_base_seconds = 10
+notifications = true
+
+[discord]
+enabled = false
+channels = []
+# 日後啟用需重新編譯 --features discord，並在環境變數提供 TRSERIAL_DISCORD_TOKEN。

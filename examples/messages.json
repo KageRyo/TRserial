@@ -1,0 +1,12 @@
+[
+  {
+    "source": "discord:mock",
+    "id": "example-1",
+    "text": "序號\nmalojam1106\n20周年TR箱子(小) 1個\n綿綿兔箱子 3個\n角色兌換券 1張\n序號到期日:11/15 23:59"
+  },
+  {
+    "source": "discord:mock",
+    "id": "example-1-duplicate",
+    "text": "序號\nmalojam1106\n20周年TR箱子(小) 1個\n綿綿兔箱子 3個\n角色兌換券 1張\n序號到期日:11/15 23:59"
+  }
+]

@@ -1,0 +1,251 @@
+# TRserial
+
+TRserial 是「跑Online」（TalesRunner）的多帳號序號兌換工具，使用 Rust 撰寫。可以匯入序號訊息、保留獎勵描述，並透過 Chrome 的官方表單依序處理各帳號。每個帳號的結果分開儲存，重開程式後可接續尚未送出的工作。
+
+可直接使用 CLI 匯入與兌換序號，Discord 為選用功能。執行時無需 Python 或 Node.js。專案採用 [MIT](LICENSE) 授權。
+
+## 目前能做什麼
+
+- 從手動文字、UTF-8 檔案或假訊息來源擷取多組不同長度的序號。保留原文、來源、獎勵原文及到期日文字。
+- 管理多個帳號與別名。Windows 使用 Credential Manager，Linux 使用 Secret Service；SQLite 與設定檔不儲存密碼。
+- 使用 Chrome／Chromium 與 WebDriver 填寫官方兌換表單。遇到驗證時等待使用者在瀏覽器操作，通過後繼續。
+- 以 SQLite 記錄每個帳號／序號的工作、嘗試次數、結果、錯誤類別與時間。只有送出前的暫時錯誤會自動重試。
+- 提供成功、人工驗證、失敗或結果不明，以及整批處理摘要的桌面通知。
+- 用 `daemon` 接續佇列。剪貼簿監看與 Discord Bot 需額外編譯並明確啟用。
+
+測試結果與待驗收項目見 [驗證紀錄](VALIDATION.md)。
+
+## 安裝
+
+使用目前的 Rust stable（edition 2024）。`Cargo.lock` 已納入版本控制。SQLite 隨程式編譯，不必另裝資料庫。
+
+### Windows 10／11 x64
+
+安裝 [Rust](https://rustup.rs/) 與 Visual Studio Build Tools 的「使用 C++ 的桌面開發」，再在 PowerShell 執行：
+
+```powershell
+git clone https://github.com/KageRyo/TRserial.git
+cd TRserial
+cargo install --path . --locked
+trserial init
+trserial doctor
+```
+
+若 `trserial` 找不到，重新開啟終端，或使用 `$env:USERPROFILE\.cargo\bin\trserial.exe`。
+
+### Ubuntu／Linux x86_64
+
+```bash
+sudo apt install build-essential pkg-config
+# 先依 https://rustup.rs/ 安裝 Rust stable
+git clone https://github.com/KageRyo/TRserial.git
+cd TRserial
+cargo install --path . --locked
+trserial init
+trserial doctor
+```
+
+Linux 憑證庫需要登入中的 D-Bus 工作階段與已解鎖的 Secret Service，例如 GNOME Keyring 或提供 Secret Service 的 KWallet。D-Bus 建置來源隨程式提供。通知需要桌面通知服務；人工驗證需要可見的瀏覽器。WSL、SSH 或純命令列環境可用 `--session-only` 改為執行時輸入密碼。
+
+## 設定 Chrome 與 WebDriver
+
+安裝 Chrome／Chromium，再從 [Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/) 取得**相符版本**的 ChromeDriver。將 `chromedriver`／`chromedriver.exe` 放入 PATH，先在另一個終端啟動：
+
+```bash
+chromedriver --port=9515 --allowed-ips=127.0.0.1
+```
+
+保持這個終端執行。WebDriver 使用本機 HTTP 位址，瀏覽器與驅動程式需自行安裝。
+
+`trserial init` 會顯示設定檔位置。可參照 [config.example.toml](config.example.toml)，或明確指定：
+
+```bash
+trserial --config config.example.toml doctor
+```
+
+預設為有視窗模式。`browser_binary` 可指定 Chrome 執行檔，`headless = true` 只適合不需人工驗證的環境。官方目前使用 Cloudflare Turnstile，建議保持 `headless = false`。背景工作也需要已登入的圖形桌面與可用的 WebDriver。
+
+程式會檢查官方網域、表單目的地與欄位內容。欄位為 `account`、`passward`（官方拼字）、`code`，送出按鈕為 `#btnSend`。
+
+## 新增帳號與第一次 dry run
+
+```bash
+trserial account add
+# 依序輸入別名、遊戲帳號、密碼；密碼不回顯。
+trserial account add
+trserial account list
+trserial ingest --file examples/message.txt
+trserial code list
+trserial redeem malojam1106 --all --dry-run
+```
+
+Dry run 會檢查設定、序號格式、指定帳號及既有工作狀態，列出預計處理的工作。試跑保留佇列原狀，不送出序號，可在安裝 ChromeDriver 前執行。
+
+新增帳號需要可用的系統憑證庫。若要每次執行才輸入密碼：
+
+```bash
+trserial account add --session-only
+```
+
+密碼讀取失敗時，互動終端會重新詢問密碼；背景工作則記為 `failed`，修復後可重試。帳號設定與兌換歷史分開儲存。移除帳號後，歷史仍會保留；在同一資料目錄重新新增完全相同的遊戲帳號，會接回原本的兌換紀錄。
+
+```bash
+trserial account remove my-alias
+```
+
+## 匯入、檢查與兌換
+
+```bash
+trserial ingest --text "序號: malojam1106"
+trserial ingest --file examples/message.txt
+trserial ingest --mock examples/messages.json
+trserial code list
+trserial history --messages
+```
+
+有「序號」「兌換碼」「Code」等標記的內容會視為已確認；獨立出現的英數混合字串會標為 `needs_review`，確認後才能排程：
+
+```bash
+trserial code approve AbC123
+trserial redeem AbC123 --account my-alias --dry-run
+trserial redeem AbC123 --account my-alias
+trserial redeem malojam1106 --all
+```
+
+序號以原始大小寫儲存。純英文或純數字序號請用 `序號: ...` 匯入。到期日保留原文，過期狀態依網站回覆判定。獎勵描述接在最近一組序號後；一則訊息有多組序號時，可用 `history --messages` 核對原文。
+
+出現驗證時，在瀏覽器完成驗證，程式便會接續送出。等待期間可用 Ctrl+C 結束，未送出的工作留待下次處理。
+
+```bash
+trserial history
+trserial history --attempts
+trserial status
+trserial daemon
+```
+
+單次 `redeem` 只處理一輪，暫時失敗的工作會依設定排定下次時間，由 `daemon` 接續。`daemon` 會為所有已確認序號及目前設定的帳號建立工作，因此新增帳號後也會處理舊序號。未經確認的序號會留在待審查清單。
+
+| 狀態 | 意義與後續處理 |
+| --- | --- |
+| `pending` | 尚未送出，或等候有上限的退避重試 |
+| `processing` | 正在準備或等待網站回覆 |
+| `waiting_verification` | 等待在瀏覽器完成驗證 |
+| `success` | 網站確認兌換成功 |
+| `already_redeemed` | 網站回覆已兌換 |
+| `expired` | 網站回覆已過期 |
+| `failed` | 網站拒絕、驗證逾時、無法取用密碼或送出前重試已達上限 |
+| `unknown` | 已進入送出階段，結果待核對 |
+
+程式會在點擊前記錄送出狀態。進入送出階段後若中斷或收不到可辨識的回覆，工作會標為 `unknown`。同一帳號／序號組合只建立一份工作。核對結果後，可將失敗或結果不明的工作排回佇列：
+
+```bash
+trserial retry 1 --acknowledge
+trserial daemon --once
+```
+
+`retry` 接受 `failed`／`unknown`，會清除重試計數並開始新一輪嘗試。`success`、`already_redeemed` 與 `expired` 保留為完成狀態。
+
+## 桌面通知與背景啟動
+
+```bash
+trserial doctor --test-notification
+```
+
+Windows 使用 Toast 通知，Linux 使用桌面通知服務。通知顯示網站結果，獎勵描述來自匯入訊息。顯示設定由作業系統控制，完整結果可查 `history`。可在設定中關閉 `notifications`。
+
+Linux 可安裝使用者服務範例：
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp examples/trserial.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now trserial.service
+journalctl --user -u trserial.service
+```
+
+服務需要 `~/.cargo/bin/trserial`、桌面 D-Bus／顯示環境與 ChromeDriver。登入後可用 `systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XAUTHORITY` 匯入圖形工作階段環境；停止服務用 `systemctl --user stop trserial`。
+
+Windows 可在已登入的 PowerShell 執行 [工作排程範例](examples/windows-task.ps1)：
+
+```powershell
+.\examples\windows-task.ps1
+# 取消自動啟動：
+Unregister-ScheduledTask -TaskName TRserial -Confirm:$false
+```
+
+工作會在使用者登入後，以一般權限執行。ChromeDriver 須另行啟動；背景工作使用系統憑證庫中的密碼。新增、移除帳號或人工重試前，先停止 daemon。
+
+### 選用剪貼簿監看
+
+```bash
+cargo install --path . --locked --features clipboard
+trserial daemon --clipboard
+```
+
+加上 `--clipboard` 後，每輪會在本機檢查剪貼簿，儲存含候選序號的訊息原文。不確定的候選仍需人工確認。Linux 使用 X11，Wayland 需搭配 XWayland。
+
+## 日後啟用 Discord
+
+Discord 預設關閉。可先用假訊息試跑匯入流程：
+
+```bash
+trserial ingest --mock examples/messages.json
+trserial daemon --mock examples/messages.json --once
+```
+
+第二行會處理佇列；若已設定真實帳號，會進入真實瀏覽器流程。只想檢查解析結果時使用 `ingest --mock`，再執行 `redeem ... --dry-run`。
+
+待要連接 Discord 時：
+
+1. 在 Discord Developer Portal 建立官方 Bot，啟用 **Message Content Intent**。
+2. 邀請到目標伺服器，授予目標頻道的 View Channel、Read Message History 權限。
+3. 以 `cargo install --path . --locked --features discord` 編譯。
+4. 將 Token 設為執行環境的 `TRSERIAL_DISCORD_TOKEN`。
+5. 在設定中將 `[discord] enabled = true`，並填入 `channels = [實際頻道的數字ID]`，再執行 `trserial daemon`。
+
+Serenity 介接器會接收新訊息，使用相同解析器與去重邏輯。第一次啟用只讀取各頻道最近 100 則，之後根據 SQLite 游標分頁補抓；重新建立連線與恢復連線時也會補抓。游標只在訊息匯入完成後前進。補抓範圍為首次啟用時最近 100 則，以及游標之後仍存在的訊息原文。
+
+## 資料與安全
+
+預設資料位置由作業系統決定，`init` 會列出實際路徑。Windows 通常為 `%LOCALAPPDATA%\trserial\data`，Linux 為 `$XDG_DATA_HOME/trserial`（未設定時為 `~/.local/share/trserial`）。所有指令都可加 `--data-dir PATH`。
+
+- `config.toml`：操作設定，不放密碼或 Token。
+- `accounts.sqlite`：帳號識別碼、別名、使用者名稱與憑證模式。與兌換歷史分開管理。
+- `history.sqlite`：來源原文、解析獎勵、序號、每帳號工作、嘗試紀錄及 Discord 游標。
+- `worker.lock`：防止同一資料目錄有多個瀏覽器工作同時執行；離開時由作業系統釋放。
+
+資料庫未加密，內含帳號名稱／別名與匯入訊息，請保護資料目錄與備份。Linux 建立目錄時設為僅本人可存取；Windows 使用使用者目錄既有權限。密碼只放系統憑證庫或記憶體，錯誤紀錄使用固定的錯誤類別。
+
+瀏覽器使用 WebDriver 的暫存設定檔。強制終止程式後，可手動關閉殘留瀏覽器。`.gitignore` 已排除 `.env`、SQLite、本機狀態及指定的瀏覽器設定檔目錄。
+
+## 疑難排解
+
+- **無法連線 WebDriver**：先啟動 ChromeDriver，確認連接埠與版本。`doctor` 會檢查連接埠，版本可用 `chrome --version` 與 `chromedriver --version` 核對。
+- **憑證庫不可用**：解鎖系統憑證庫／確認 Linux Secret Service；或用 `account add --session-only` 並在互動終端執行。
+- **一直等待驗證**：在瀏覽器完成驗證；headless 模式請改回有視窗模式。
+- **`unknown`**：核對遊戲或官方結果後，需要重試時使用 `retry ID --acknowledge`。
+- **欄位或送出目的地變更**：程式會停止，需更新 `src/browser.rs` 的定位與測試。
+- **已有程序執行中**：停止同資料目錄的 daemon 後再執行。
+
+## 開發與驗證
+
+```bash
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+cargo build --locked --release
+# 額外檢查可選來源：
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-features
+```
+
+一般測試不需帳號、網路、桌面憑證庫或 Discord。真實瀏覽器測試使用本機 HTTP 假頁面，需相符版本的 Chrome／ChromeDriver：
+
+```bash
+# Linux 範例；Windows PowerShell 以 $env:CHROME_BIN / $env:CHROMEDRIVER 設定。
+export CHROME_BIN=/absolute/path/to/chrome
+export CHROMEDRIVER=/absolute/path/to/chromedriver
+cargo test --locked --test browser_flow -- --ignored
+```
+
+[GitHub Actions](https://github.com/KageRyo/TRserial/actions) 會在 Ubuntu 與 Windows 執行格式、Clippy、測試、release build 及本機瀏覽器整合測試。

@@ -1,0 +1,11 @@
+<!doctype html><html lang="zh-Hant"><meta charset="utf-8"><title>Local serial fixture</title>
+<body>
+<form id="serial" method="post" action="{{ACTION}}">
+<label>Account <input name="account" required maxlength="30"></label>
+<label>Password <input type="password" name="passward" required maxlength="30"></label>
+<label>Code <input name="code" required maxlength="30"></label>
+<div class="cf-turnstile">Local fixture verification, not a real CAPTCHA</div>
+<input type="hidden" name="cf-turnstile-response" value="{{TOKEN}}">
+<button id="btnSend" type="submit">Redeem</button>
+</form>
+</body></html>
