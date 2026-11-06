@@ -15,11 +15,21 @@ use trserial::{
     config::Config,
     store::Status,
 };
-struct Driver(Child);
+struct Driver {
+    child: Child,
+    logs: tempfile::TempDir,
+}
 impl Drop for Driver {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if std::thread::panicking() {
+            for name in ["chromedriver.log", "chrome.log"] {
+                if let Ok(log) = std::fs::read_to_string(self.logs.path().join(name)) {
+                    eprintln!("{name} (local fixture with test credentials):\n{log}");
+                }
+            }
+        }
     }
 }
 struct Fixture {
@@ -144,15 +154,23 @@ async fn real_browser_fills_verifies_submits_and_reads_confirmed_outcomes() {
     let port = socket.local_addr().unwrap().port();
     drop(socket);
     let driver_path = std::env::var("CHROMEDRIVER").unwrap_or_else(|_| "chromedriver".into());
-    let _driver = Driver(
-        Command::new(driver_path)
+    let logs = tempfile::TempDir::new().unwrap();
+    let _driver = Driver {
+        child: Command::new(driver_path)
             .arg(format!("--port={port}"))
             .arg("--allowed-ips=127.0.0.1")
+            .arg("--verbose")
+            .arg(format!(
+                "--log-path={}",
+                logs.path().join("chromedriver.log").display()
+            ))
+            .env("CHROME_LOG_FILE", logs.path().join("chrome.log"))
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             .spawn()
             .expect("start chromedriver"),
-    );
+        logs,
+    };
     let mut available = false;
     for _ in 0..100 {
         if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
@@ -178,7 +196,13 @@ async fn real_browser_fills_verifies_submits_and_reads_confirmed_outcomes() {
         BrowserRedeemer::local_fixture(config.clone(), &format!("{}/waiting", fixture.url))
             .unwrap();
     assert_eq!(
-        browser.prepare(&credentials, "AbC123").await.unwrap(),
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            browser.prepare(&credentials, "AbC123")
+        )
+        .await
+        .expect("browser preparation timed out")
+        .unwrap(),
         Preparation::WaitingVerification
     );
     assert!(!browser.verification_ready().await.unwrap());
