@@ -24,6 +24,30 @@ jobs:
         id: chrome
         with:
           install-chromedriver: true
+      - name: Configure Chrome sandbox on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          CHROME_BIN: ${{ steps.chrome.outputs.chrome-path }}
+        run: |
+          chrome_path=$(readlink -f "$CHROME_BIN")
+          sudo tee /etc/apparmor.d/trserial-chrome > /dev/null <<EOF
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile trserial-chrome "$chrome_path" flags=(unconfined) {
+            userns,
+          }
+          EOF
+          sudo apparmor_parser -r /etc/apparmor.d/trserial-chrome
+      - name: Configure Chrome sandbox on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CHROME_BIN: ${{ steps.chrome.outputs.chrome-path }}
+        run: |
+          $chromeDirectory = Split-Path -Parent $env:CHROME_BIN
+          icacls $chromeDirectory /grant '*S-1-15-2-1:(OI)(CI)(RX)' /T
+          if ($LASTEXITCODE -ne 0) { throw 'Chrome sandbox permissions could not be configured' }
       - name: Local-only browser integration
         run: cargo test --locked --test browser_flow -- --ignored
         env:
