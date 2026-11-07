@@ -22,6 +22,21 @@ fn unavailable_os_store_does_not_save_account_or_fall_back_to_plaintext() {
             .is_err()
     );
     assert!(accounts.list().unwrap().is_empty());
+    let account = accounts
+        .add(
+            "session",
+            "fixture-session",
+            "DO-NOT-SAVE-THIS-PASSWORD",
+            true,
+        )
+        .unwrap();
+    assert!(
+        accounts
+            .update_password(&account.id, "DO-NOT-SAVE-THIS-PASSWORD")
+            .is_err()
+    );
+    assert!(accounts.list().unwrap()[0].session_only);
+    assert!(trserial::accounts::stored_credentials(&account).is_err());
     let bytes = std::fs::read(dir.path().join("accounts.sqlite")).unwrap();
     assert!(
         !bytes
