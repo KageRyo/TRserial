@@ -43,6 +43,12 @@ impl CredentialProvider for SystemCredentials {
         accounts::credentials(account)
     }
 }
+pub struct StoredCredentials;
+impl CredentialProvider for StoredCredentials {
+    fn get(&self, account: &Account) -> Result<Credentials> {
+        accounts::stored_credentials(account)
+    }
+}
 pub struct Worker<'a> {
     pub store: &'a mut Store,
     pub config: &'a Config,
@@ -78,6 +84,7 @@ impl Worker<'_> {
             }
             if code_filter.is_some_and(|code| code != job.code)
                 || account_filter.is_some_and(|id| id != job.account_id)
+                || !accounts.iter().any(|a| a.id == job.account_id)
             {
                 continue;
             }

@@ -48,6 +48,25 @@ pub struct Job {
 pub struct Store {
     db: Connection,
 }
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct CodeRecord {
+    pub code: String,
+    pub needs_review: bool,
+    pub test_only: bool,
+    pub discovered_at: i64,
+    pub rewards: Vec<String>,
+    pub expiration: Option<String>,
+}
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct AttemptRecord {
+    pub job_id: i64,
+    pub started_at: i64,
+    pub finished_at: Option<i64>,
+    pub status: String,
+    pub detail: String,
+}
 pub fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -184,6 +203,62 @@ impl Store {
         }
         tx.commit()?;
         Ok(added)
+    }
+    pub fn reset_baseline(&self, account: &str) -> Result<()> {
+        self.db.execute("INSERT INTO daemon_accounts VALUES(?1,(SELECT COALESCE(MAX(id),0) FROM code_sequence)) ON CONFLICT(account_id) DO UPDATE SET baseline=excluded.baseline", [account])?;
+        Ok(())
+    }
+    pub fn historical_for(&self, code: &str, account: &str) -> Result<bool> {
+        Ok(self.db.query_row("SELECT COALESCE(s.id<=d.baseline,1) FROM code_sequence s LEFT JOIN daemon_accounts d ON d.account_id=?2 WHERE s.code=?1", params![code,account], |r| r.get(0))?)
+    }
+    pub fn code_records(&self) -> Result<Vec<CodeRecord>> {
+        let mut q = self.db.prepare("SELECT c.code,c.needs_review,c.test_only,c.created_at FROM codes c JOIN code_sequence s ON s.code=c.code ORDER BY s.id DESC")?;
+        let mut records = q
+            .query_map([], |r| {
+                Ok(CodeRecord {
+                    code: r.get(0)?,
+                    needs_review: r.get(1)?,
+                    test_only: r.get(2)?,
+                    discovered_at: r.get(3)?,
+                    rewards: Vec::new(),
+                    expiration: None,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut discovery = self.db.prepare(
+            "SELECT rewards,expiration FROM discoveries WHERE code=?1 ORDER BY message_id DESC",
+        )?;
+        for record in &mut records {
+            let descriptions = discovery
+                .query_map([&record.code], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for (rewards, expiration) in descriptions {
+                for reward in serde_json::from_str::<Vec<String>>(&rewards)? {
+                    if !record.rewards.contains(&reward) {
+                        record.rewards.push(reward);
+                    }
+                }
+                if record.expiration.is_none() {
+                    record.expiration = expiration;
+                }
+            }
+        }
+        Ok(records)
+    }
+    pub fn job_attempts(&self, job_id: i64) -> Result<Vec<AttemptRecord>> {
+        let mut q=self.db.prepare("SELECT job_id,started_at,finished_at,status,detail FROM attempts WHERE job_id=?1 ORDER BY id")?;
+        Ok(q.query_map([job_id], |r| {
+            Ok(AttemptRecord {
+                job_id: r.get(0)?,
+                started_at: r.get(1)?,
+                finished_at: r.get(2)?,
+                status: r.get(3)?,
+                detail: r.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
     }
     pub fn daemon_job_allowed(&self, id: i64, backfill: bool) -> Result<bool> {
         Ok(self.db.query_row("SELECT j.manual OR ?2 OR COALESCE(s.id>d.baseline,0) FROM jobs j JOIN code_sequence s ON s.code=j.code LEFT JOIN daemon_accounts d ON d.account_id=j.account_id WHERE j.id=?1",params![id,backfill],|r|r.get(0))?)

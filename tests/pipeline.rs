@@ -191,6 +191,31 @@ async fn multiple_accounts_dedup_restart_and_notification() {
             .any(|s| s.contains("本次處理結果"))
     );
 }
+#[tokio::test]
+async fn selecting_one_account_does_not_claim_or_fail_other_accounts_pending_jobs() {
+    let dir = TempDir::new().unwrap();
+    let mut s = store(&dir);
+    discover(&mut s);
+    let accounts = [account("a"), account("b")];
+    s.enqueue("abc123", &accounts).unwrap();
+    let mut redeemer = FakeRedeemer::default();
+    run(
+        &mut s,
+        &config(),
+        &mut redeemer,
+        &accounts[..1],
+        Arc::new(Notices::default()),
+        CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(redeemer.submitted, 1);
+    let jobs = s.jobs().unwrap();
+    let held = jobs.iter().find(|j| j.account_id == "b").unwrap();
+    assert_eq!(held.status, "pending");
+    assert_eq!(held.attempts, 0);
+    assert!(s.job_attempts(held.id).unwrap().is_empty());
+}
+
 #[test]
 fn crash_recovery_distinguishes_before_and_after_submission() {
     let dir = TempDir::new().unwrap();

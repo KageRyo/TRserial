@@ -7,6 +7,11 @@ description = "Local-first TalesRunner serial code redemption with a persistent 
 license = "MIT"
 repository = "https://github.com/KageRyo/TRserial"
 
+[workspace]
+members = [".", "desktop"]
+default-members = ["."]
+resolver = "3"
+
 [features]
 default = []
 discord = ["dep:serenity"]

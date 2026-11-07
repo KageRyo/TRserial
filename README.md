@@ -2,7 +2,9 @@
 
 TRserial 是「跑Online」（TalesRunner）的多帳號序號兌換工具，使用 Rust 撰寫。可以匯入序號訊息、保留獎勵描述，並透過 Chrome 的官方表單依序處理各帳號。每個帳號的結果分開儲存，重開程式後可接續尚未送出的工作。
 
-可直接使用 CLI 匯入與兌換序號，Discord 為選用功能。執行時無需 Python 或 Node.js。專案採用 [MIT](LICENSE) 授權。
+桌面版使用原生 Rust／GPUI Kit，提供帳號、序號、兌換紀錄與系統匣操作；也保留 CLI。Discord 為選用功能，執行時無需 Python 或 Node.js。專案採用 [MIT](LICENSE) 授權。
+
+專案尚未正式發布，以下指令從原始碼安裝。Cargo 套件版本僅供開發使用。
 
 ## 目前能做什麼
 
@@ -15,7 +17,75 @@ TRserial 是「跑Online」（TalesRunner）的多帳號序號兌換工具，使
 
 測試結果與待驗收項目見 [驗證紀錄](VALIDATION.md)。
 
-## 安裝
+## 安裝桌面版
+
+使用目前的 [Rust stable](https://rustup.rs/)；桌面版至少需要 Rust 1.92。`Cargo.lock` 已納入版本控制，SQLite 隨程式編譯。兌換需要另外安裝 Chrome／Chromium 與相符版本的 ChromeDriver。
+
+### Windows 10／11 x64
+
+安裝 Rust 與 Visual Studio Build Tools 的「使用 C++ 的桌面開發」，在 PowerShell 執行：
+
+```powershell
+git clone https://github.com/KageRyo/TRserial.git
+cd TRserial
+cargo install --locked --path desktop
+trserial-desktop
+```
+
+若找不到指令，重新開啟終端，或執行 `$env:USERPROFILE\.cargo\bin\trserial-desktop.exe`。
+
+### Ubuntu／Linux x86_64
+
+```bash
+sudo apt update
+sudo apt install build-essential pkg-config cmake libfontconfig-dev libwayland-dev \
+  libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev libvulkan1 \
+  mesa-vulkan-drivers fonts-noto-cjk
+# 依 https://rustup.rs/ 安裝 Rust stable
+git clone https://github.com/KageRyo/TRserial.git
+cd TRserial
+cargo install --locked --path desktop
+trserial-desktop
+```
+
+需要可用的 X11／Wayland 桌面與 Vulkan。密碼儲存需要登入中的 D-Bus 與已解鎖的 Secret Service，例如 GNOME Keyring。系統匣使用 StatusNotifierItem；GNOME 可搭配 AppIndicator／KStatusNotifierItem 擴充套件。偵測不到系統匣時會在畫面提示，關閉視窗會結束程式。
+
+從 checkout 直接啟動：
+
+```bash
+cargo run --locked -p trserial-desktop
+# 另用資料目錄，不影響既有帳號：
+cargo run --locked -p trserial-desktop -- --data-dir .trserial/desktop
+```
+
+## 桌面版操作
+
+1. **先做離線測試**：使用下方 `--smoke-test` 指令。測試會開啟五個頁面、建立假帳號、匯入測試訊息、啟停背景工作，再自動結束。它只接受全新資料目錄，不讀取密碼、不連線兌換網站，也不修改登入啟動設定。
+2. **設定瀏覽器**：在「設定」填入 ChromeDriver 路徑，勾選「由 TRserial 管理 ChromeDriver」並儲存。Chrome 路徑可留白使用系統安裝。按「檢查 Chrome 與官方表單」，確認瀏覽器與欄位定位；檢查不填帳密、不送出表單。
+3. **新增帳號**：在「帳號」填入別名、遊戲帳號與密碼。密碼欄位遮罩，密碼存入 Windows Credential Manager／Linux Secret Service。可更新密碼、改別名、移除或關閉自動處理。CLI 的 `--session-only` 帳號需先在帳號頁更新密碼，才能在桌面背景處理。
+4. **匯入序號**：在「序號」輸入一組序號，或按「匯入訊息」貼上文字。列表顯示原訊息的獎勵與到期文字；待確認的候選序號需先批准。選取序號與帳號後，確認視窗會列出實際兌換範圍。正式驗收先選一個帳號及一組有效序號。
+5. **核對結果**：「兌換紀錄」可依狀態、帳號與序號篩選，查看每次嘗試與結果。`unknown` 表示網站結果尚未確認；核對官方或遊戲紀錄後，再按「人工重試」。完成的組合會保留，不會因重開程式重送。
+6. **啟用背景工作**：按「開始自動處理」。首次開啟或新增帳號時建立歷史基準，既有序號不會整批自動送出。「補抓歷史序號」需另外確認；重新啟用帳號也會重設基準，保留停用期間累積的序號供手動處理。
+
+```powershell
+# Windows PowerShell；每次測試使用新的目錄名稱
+cargo run --locked -p trserial-desktop -- --data-dir .trserial/gui-smoke-win --smoke-test
+```
+
+```bash
+# Linux 桌面
+cargo run --locked -p trserial-desktop -- --data-dir .trserial/gui-smoke-linux --smoke-test
+```
+
+「暫停」與「停止」會取消目前工作並關閉瀏覽器，已進入送出階段的結果保留為 `unknown`。暫停後可以手動兌換或編輯設定；再次開始會接續符合規則的待處理工作。遇到 Cloudflare 驗證時 Chrome 保持可見，請在瀏覽器完成驗證。
+
+系統匣可顯示／收起主視窗、開始／暫停、開啟設定與結束程式。有系統匣時，關閉視窗會保留背景工作；選「結束」才會關閉瀏覽器並釋放程序鎖。Linux 若失去系統匣 host，會重新開啟視窗。目前收起視窗會清除尚未送出或儲存的表單內容，請先儲存設定。每個資料目錄只允許一個桌面程序，CLI 與桌面共用工作鎖。
+
+「設定」可儲存明暗外觀、通知、開啟時自動處理與登入啟動。登入啟動僅寫入目前使用者的 Windows Run 登錄值或 Linux `~/.config/autostart/trserial.desktop`。桌面會顯示執行狀態、目前序號／帳號與驗證等待；新確認序號與兌換結果使用既有桌面通知。
+
+桌面版的 Discord 監聽顯示「未設定」，目前未提供 Token 設定介面；既有頻道 ID 僅供查看。需要 Discord 時使用下方選用 CLI 功能，Token 仍由環境變數提供。
+
+## 安裝 CLI
 
 使用目前的 Rust stable（edition 2024）。`Cargo.lock` 已納入版本控制。SQLite 隨程式編譯，不必另裝資料庫。
 
@@ -283,6 +353,9 @@ Serenity 介接器會接收新訊息，使用相同解析器與去重邏輯。�
 
 ## 疑難排解
 
+- **桌面視窗無法開啟**：Linux 確認登入 X11／Wayland 與 Vulkan 驅動；純 SSH 環境請使用 CLI。啟動錯誤會輸出到終端。
+- **關閉後找不到視窗**：從系統匣點選圖示或「顯示視窗」；沒有可用系統匣時程式會保留視窗，關閉則結束。
+- **帳號頁無法儲存密碼**：解鎖作業系統憑證庫後重試，桌面版不會改存明文或要求在隱藏終端輸入。
 - **無法連線 WebDriver**：執行 `doctor` 查看 `/status`；外部管理模式先啟動 ChromeDriver，管理模式則檢查 `driver.binary` 與執行權限。版本可用 `chrome --version` 與 `chromedriver --version` 核對。
 - **憑證庫不可用**：解鎖系統憑證庫／確認 Linux Secret Service；或用 `account add --session-only` 並在互動終端執行。
 - **一直等待驗證**：在瀏覽器完成驗證；headless 模式請改回有視窗模式。
@@ -293,13 +366,17 @@ Serenity 介接器會接收新訊息，使用相同解析器與去重邏輯。�
 ## 開發與驗證
 
 ```bash
-cargo fmt --check
+cargo fmt --all --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 cargo build --locked --release
 # 額外檢查可選來源：
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features
+# 桌面版（Linux 需先安裝上述原生函式庫）：
+cargo clippy --locked -p trserial-desktop --all-targets --all-features -- -D warnings
+cargo test --locked -p trserial-desktop
+cargo build --locked --release -p trserial-desktop
 ```
 
 一般測試不需帳號、網路、桌面憑證庫或 Discord。真實瀏覽器測試使用本機 HTTP 假頁面，需相符版本的 Chrome／ChromeDriver：
@@ -311,4 +388,6 @@ export CHROMEDRIVER=/absolute/path/to/chromedriver
 cargo test --locked --test browser_flow -- --ignored
 ```
 
-[GitHub Actions](https://github.com/KageRyo/TRserial/actions) 會在 Ubuntu 與 Windows 執行格式、Clippy、測試、release build 及本機瀏覽器整合測試。
+[GitHub Actions](https://github.com/KageRyo/TRserial/actions) 分別在 Ubuntu 與 Windows 驗證 CLI 與桌面版，包含 Clippy、單元／介面測試、原生視窗 smoke test 及最佳化編譯。Linux 另以獨立 D-Bus fixture 測試實際系統匣的隱藏、還原與結束。`cargo build --release` 只做本機編譯，CI 不發布執行檔。
+
+`desktop/` 負責 GPUI Kit 頁面與系統匣，透過背景執行緒的命令／快照更新 UI。`src/service.rs` 共用帳號、匯入、確認範圍、設定與瀏覽器工作生命週期；SQL 與兌換規則留在 core。Workspace 預設只建置 CLI，不要求 GUI 的系統函式庫。

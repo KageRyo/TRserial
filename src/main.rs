@@ -11,9 +11,10 @@ use trserial::{
     config::{self, Config},
     notifications::{self, Notifier},
     parser,
+    service::{RedemptionSession, RunScope},
     source::{self, ManualSource, MockSource},
     store::{Status, Store},
-    worker::{SystemCredentials, Worker, WorkerLock},
+    worker::{SystemCredentials, WorkerLock},
 };
 
 #[derive(Parser)]
@@ -120,11 +121,7 @@ enum CodeCommand {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Dependencies' verbose HTTP logs can contain form payloads. Only our own events are enabled.
-    tracing_subscriber::fmt()
-        .with_env_filter("trserial=info")
-        .with_target(false)
-        .init();
+    trserial::init_logging();
     let cli = Cli::parse();
     let dir = cli.data_dir.unwrap_or(config::default_data_dir()?);
     config::prepare_dir(&dir)?;
@@ -415,23 +412,23 @@ async fn main() -> Result<()> {
             let cancel = cancellation();
             #[cfg(feature = "discord")]
             let discord = trserial::discord::start(&config.discord, &dir, cancel.clone()).await?;
-            let mut browser = BrowserRedeemer::new(config.clone());
+            let mut session = RedemptionSession::new(config.clone());
             println!("背景處理已啟動；Ctrl+C 結束。歷史補抓：{}", backfill);
 
             let result:Result<()> = async {
                 loop {
                     #[cfg(feature="clipboard")]
                     if let Some(source)=&mut clipboard_source {source::ingest_source(&mut store,source)?;}
-                    let current=accounts.list()?;
+                    let current=accounts.automatic_accounts()?;
                     store.schedule_daemon(&current,backfill)?;
-                    Worker{store:&mut store,config:&config,redeemer:&mut browser,credentials:&SystemCredentials,notifier:notifications::desktop(config.notifications),cancel:cancel.clone()}.run_scoped(&current,None,None,Some(backfill)).await?;
+                    session.sweep(&mut store,&current,RunScope::automatic(backfill),cancel.clone(),&SystemCredentials).await?;
                     if once || cancel.is_cancelled() {break;}
                     tokio::select! {_=cancel.cancelled()=>break,_=tokio::time::sleep(Duration::from_secs(2))=>{}}
                 }
                 Ok(())
             }.await;
             cancel.cancel();
-            browser.shutdown().await;
+            session.shutdown().await;
             #[cfg(feature = "discord")]
             if let Some(task) = discord {
                 let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
@@ -525,17 +522,17 @@ async fn run_worker(
     account: Option<&str>,
     cancel: CancellationToken,
 ) -> Result<usize> {
-    let mut browser = BrowserRedeemer::new(config.clone());
-    let mut worker = Worker {
-        store,
-        config,
-        redeemer: &mut browser,
-        credentials: &SystemCredentials,
-        notifier: notifications::desktop(config.notifications),
-        cancel,
-    };
-    let result = worker.run(accounts, code, account).await;
-    browser.shutdown().await;
+    let mut session = RedemptionSession::new(config.clone());
+    let result = session
+        .sweep(
+            store,
+            accounts,
+            RunScope::manual(code, account),
+            cancel,
+            &SystemCredentials,
+        )
+        .await;
+    session.shutdown().await;
     result
 }
 async fn doctor(config: &Config, dir: &Path, test_notification: bool) -> Result<()> {
