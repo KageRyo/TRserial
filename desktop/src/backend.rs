@@ -508,7 +508,10 @@ impl<'a> Actor<'a> {
                     self.dir.clone(),
                     self.service.snapshot()?.config,
                 ));
-                self.handle.publish(|p| p.state = RunState::Checking);
+                self.handle.publish(|p| {
+                    p.state = RunState::Checking;
+                    p.browser_report = None;
+                });
                 Ok(None)
             }
             Command::Save {
@@ -544,7 +547,7 @@ impl<'a> Actor<'a> {
         let login_changed = next.start_on_login != self.preferences.start_on_login;
         let result = (|| -> Result<()> {
             if login_changed {
-                platform::set_login(next.start_on_login, &self.dir)?;
+                platform::set_login(next.start_on_login, &self.dir, &self.config_path)?;
             }
             std::fs::rename(&temporary, &self.pref_path)?;
             Ok(())
@@ -555,14 +558,20 @@ impl<'a> Actor<'a> {
                 .save_config(previous)
                 .context("設定儲存失敗，還原瀏覽器設定時也發生錯誤；請檢查 config.toml")?;
             if login_changed {
-                platform::set_login(self.preferences.start_on_login, &self.dir)
-                    .context("設定儲存失敗，請檢查登入啟動設定")?;
+                platform::set_login(
+                    self.preferences.start_on_login,
+                    &self.dir,
+                    &self.config_path,
+                )
+                .context("設定儲存失敗，請檢查登入啟動設定")?;
             }
             return Err(error);
         }
         self.preferences = next;
-        self.handle
-            .publish(|p| p.preferences = self.preferences.clone());
+        self.handle.publish(|p| {
+            p.preferences = self.preferences.clone();
+            p.browser_report = None;
+        });
         Ok(())
     }
     async fn refresh(&mut self) -> Result<()> {
@@ -766,7 +775,7 @@ mod tests {
         backend.wait_closed().await;
     }
     #[tokio::test]
-    async fn preferences_write_failure_restores_the_previous_configuration() {
+    async fn settings_failure_rolls_back_and_recovery_invalidates_browser_diagnostics() {
         let dir = TempDir::new().unwrap();
         let backend = Backend::start(dir.path().into(), dir.path().join("config.toml"), true);
         let before = wait(&backend, |p| p.data.is_some()).await;
@@ -790,6 +799,24 @@ mod tests {
             old_delay
         );
         assert!(!dir.path().join("desktop.toml.tmp").exists());
+        std::fs::remove_dir(dir.path().join("desktop.toml")).unwrap();
+        backend.publish(|p| {
+            p.error = None;
+            p.browser_report = Some("previous inspection fixture".into());
+        });
+        let mut config = Config::load(&dir.path().join("config.toml")).unwrap();
+        config.delay_seconds = old_delay + 1;
+        backend.send(Command::Save {
+            config,
+            preferences: before.preferences,
+        });
+        let saved = wait(&backend, |p| {
+            p.data
+                .as_ref()
+                .is_some_and(|d| d.config.delay_seconds == old_delay + 1)
+        })
+        .await;
+        assert!(saved.browser_report.is_none());
         backend.request_quit();
         backend.wait_closed().await;
     }

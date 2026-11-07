@@ -343,9 +343,13 @@ Serenity 介接器會接收新訊息，使用相同解析器與去重邏輯。�
 預設資料位置由作業系統決定，`init` 會列出實際路徑。Windows 通常為 `%LOCALAPPDATA%\trserial\data`，Linux 為 `$XDG_DATA_HOME/trserial`（未設定時為 `~/.local/share/trserial`）。所有指令都可加 `--data-dir PATH`。
 
 - `config.toml`：操作設定，不放密碼或 Token。
-- `accounts.sqlite`：帳號識別碼、別名、使用者名稱與憑證模式。與兌換歷史分開管理。
+- `desktop.toml`：桌面外觀與啟動偏好。
+- `desktop.lock`：同一資料目錄的桌面程序鎖。
+- `accounts.sqlite`：帳號識別碼、別名、使用者名稱、憑證模式與自動處理開關。與兌換歷史分開管理。
 - `history.sqlite`：來源原文、解析獎勵、序號、每帳號工作、嘗試紀錄及 Discord 游標。
 - `worker.lock`：防止同一資料目錄有多個瀏覽器工作同時執行；離開時由作業系統釋放。
+
+桌面版會更新帳號資料格式。同時使用 CLI 時，請從同一份原始碼更新 CLI；舊執行檔無法讀取升級後的帳號資料。
 
 資料庫未加密，內含帳號名稱／別名與匯入訊息，請保護資料目錄與備份。Linux 建立目錄時設為僅本人可存取；Windows 使用使用者目錄既有權限。密碼只放系統憑證庫或記憶體。錯誤紀錄使用錯誤類別與表單定位，轉址訊息只顯示網域，不回顯查詢參數或網站原始回應。
 

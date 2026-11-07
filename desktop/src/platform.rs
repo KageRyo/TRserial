@@ -3,7 +3,7 @@ use std::path::Path;
 #[cfg(target_os = "linux")]
 use std::path::PathBuf;
 
-pub(crate) fn login_command(executable: &Path, dir: &Path) -> Result<String> {
+pub(crate) fn login_command(executable: &Path, dir: &Path, config: &Path) -> Result<String> {
     fn quote(value: &Path) -> Result<String> {
         let value = value.to_str().context("啟動路徑必須是有效文字")?;
         ensure!(
@@ -29,7 +29,12 @@ pub(crate) fn login_command(executable: &Path, dir: &Path) -> Result<String> {
             Ok(format!("\"{escaped}\""))
         }
     }
-    Ok(format!("{} --data-dir {}", quote(executable)?, quote(dir)?))
+    Ok(format!(
+        "{} --data-dir {} --config {}",
+        quote(&std::path::absolute(executable)?)?,
+        quote(&std::path::absolute(dir)?)?,
+        quote(&std::path::absolute(config)?)?
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -57,8 +62,8 @@ pub(crate) fn login_enabled() -> bool {
         false
     }
 }
-pub(crate) fn set_login(enabled: bool, dir: &Path) -> Result<()> {
-    let command = login_command(&std::env::current_exe()?, dir)?;
+pub(crate) fn set_login(enabled: bool, dir: &Path, config: &Path) -> Result<()> {
+    let command = login_command(&std::env::current_exe()?, dir, config)?;
     #[cfg(target_os = "linux")]
     {
         let path = login_file()?;
@@ -105,7 +110,8 @@ pub(crate) fn set_window_visible(window: &gpui_kit::Window, visible: bool) -> Re
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         IsWindowVisible, SW_HIDE, SW_SHOW, ShowWindow,
     };
-    let handle = HasWindowHandle::window_handle(window)?;
+    let handle = HasWindowHandle::window_handle(window)
+        .map_err(|_| anyhow::anyhow!("無法取得 TRserial 的視窗控制代碼"))?;
     let RawWindowHandle::Win32(handle) = handle.as_raw() else {
         anyhow::bail!("無法取得 TRserial 的 Windows 視窗");
     };
@@ -221,20 +227,38 @@ mod tests {
     use super::*;
     #[test]
     fn login_arguments_are_quoted_and_reject_line_injection() {
-        assert!(login_command(Path::new("app\ninjected"), Path::new("data")).is_err());
+        assert!(
+            login_command(
+                Path::new("app\ninjected"),
+                Path::new("data"),
+                Path::new("config.toml")
+            )
+            .is_err()
+        );
         let command = login_command(
-            Path::new("/Program Files/TRserial/app"),
-            Path::new("/user/data directory"),
+            Path::new("Program Files/TRserial/app"),
+            Path::new("user/data directory"),
+            Path::new("settings/custom config.toml"),
         )
         .unwrap();
-        assert!(
-            command.contains("\"/Program Files/TRserial/app\" --data-dir \"/user/data directory\"")
-        );
+        for relative in [
+            "Program Files/TRserial/app",
+            "user/data directory",
+            "settings/custom config.toml",
+        ] {
+            let absolute = std::path::absolute(relative).unwrap();
+            assert!(command.contains(&format!("\"{}\"", absolute.display())));
+        }
+        assert!(command.contains(" --config "));
         #[cfg(not(windows))]
         assert!(
-            login_command(Path::new("app%U"), Path::new("data"))
-                .unwrap()
-                .contains("app%%U")
+            login_command(
+                Path::new("app%U"),
+                Path::new("data"),
+                Path::new("config.toml")
+            )
+            .unwrap()
+            .contains("app%%U")
         );
     }
 }
