@@ -175,6 +175,7 @@ struct DesktopApp {
     window: Option<AnyWindowHandle>,
     tray: Option<Tray>,
     quitting: bool,
+    hidden: bool,
     _quit: Subscription,
     _poll: Task<()>,
 }
@@ -194,7 +195,17 @@ fn show(cx: &mut App) {
     if let Some(handle) = existing {
         // A command dispatched by this window already holds its update lease.
         // Failure to re-enter that lease must not create a second window.
-        let _ = handle.update(cx, |_, window, _| window.activate_window());
+        let _ = handle.update(cx, |_, window, cx| {
+            #[cfg(windows)]
+            if let Err(error) = crate::platform::set_window_visible(window, true) {
+                cx.global::<DesktopApp>()
+                    .backend
+                    .smoke_error(error.to_string());
+                return;
+            }
+            window.activate_window();
+            cx.global_mut::<DesktopApp>().hidden = false;
+        });
         return;
     }
     controller.update(cx, |c, _| c.presentation = c.backend.snapshot());
@@ -219,8 +230,7 @@ fn show(cx: &mut App) {
                     return true;
                 }
                 if tray_available(cx) {
-                    cx.global_mut::<DesktopApp>().window = None;
-                    window.remove_window();
+                    hide_window(window, cx);
                 } else {
                     quit(cx);
                 }
@@ -229,6 +239,7 @@ fn show(cx: &mut App) {
         })
         .ok();
     cx.global_mut::<DesktopApp>().window = Some(handle);
+    cx.global_mut::<DesktopApp>().hidden = false;
 }
 fn tray_available(cx: &App) -> bool {
     let app = cx.global::<DesktopApp>();
@@ -239,12 +250,26 @@ fn hide(cx: &mut App) {
         show(cx);
         return;
     }
-    if let Some(handle) = cx.global_mut::<DesktopApp>().window.take() {
-        handle
-            .update(cx, |_, window, _| window.remove_window())
-            .ok();
+    if let Some(handle) = cx.global::<DesktopApp>().window {
+        let _ = handle.update(cx, |_, window, cx| hide_window(window, cx));
     }
 }
+fn hide_window(window: &mut Window, cx: &mut App) {
+    #[cfg(windows)]
+    if let Err(error) = crate::platform::set_window_visible(window, false) {
+        cx.global::<DesktopApp>()
+            .backend
+            .smoke_error(error.to_string());
+        return;
+    }
+    #[cfg(not(windows))]
+    {
+        cx.global_mut::<DesktopApp>().window = None;
+        window.remove_window();
+    }
+    cx.global_mut::<DesktopApp>().hidden = true;
+}
+
 fn quit(cx: &mut App) {
     let app = cx.global_mut::<DesktopApp>();
     app.quitting = true;
@@ -331,7 +356,7 @@ fn synchronize(snapshot: &crate::backend::Presentation, cx: &mut App) -> bool {
             let _ = tray.refresh_menu(cx);
         }
     }
-    if cx.global::<DesktopApp>().window.is_none()
+    if cx.global::<DesktopApp>().hidden
         && !tray_available(cx)
         && !cx.global::<DesktopApp>().quitting
     {
@@ -422,6 +447,7 @@ pub(crate) fn run(backend: Backend, smoke: bool) {
                 window: None,
                 tray: None,
                 quitting: false,
+                hidden: false,
                 _quit: quit_subscription,
                 _poll: poll,
             });
@@ -432,7 +458,7 @@ pub(crate) fn run(backend: Backend, smoke: bool) {
                     .tooltip("TRserial")
                     .title("TRserial")
                     .menu(menu)
-                    .on_activate(ShowWindow)
+                    .on_activate_with(|_, cx| show(cx))
                     .build(cx)
             });
             if let Ok(tray) = tray {
@@ -540,7 +566,7 @@ async fn native_smoke(backend: &Backend, cx: &mut AsyncApp) -> anyhow::Result<()
     cx.update(hide);
     if tray {
         anyhow::ensure!(
-            cx.update(|cx| cx.global::<DesktopApp>().window.is_none()),
+            cx.update(|cx| cx.global::<DesktopApp>().hidden),
             "視窗未收起"
         );
         anyhow::ensure!(
@@ -552,7 +578,7 @@ async fn native_smoke(backend: &Backend, cx: &mut AsyncApp) -> anyhow::Result<()
         #[cfg(not(target_os = "linux"))]
         cx.update(|cx| cx.dispatch_action(&ShowWindow));
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while cx.update(|cx| cx.global::<DesktopApp>().window.is_none()) {
+        while cx.update(|cx| cx.global::<DesktopApp>().hidden) {
             anyhow::ensure!(std::time::Instant::now() < deadline, "系統匣未還原視窗");
             cx.background_executor()
                 .timer(Duration::from_millis(30))
@@ -561,7 +587,8 @@ async fn native_smoke(backend: &Backend, cx: &mut AsyncApp) -> anyhow::Result<()
         eprintln!("TRserial native tray hide/restore passed");
     } else {
         anyhow::ensure!(
-            cx.update(|cx| cx.global::<DesktopApp>().window.is_some()),
+            cx.update(|cx| cx.global::<DesktopApp>().window.is_some()
+                && !cx.global::<DesktopApp>().hidden),
             "無系統匣時遺失唯一視窗"
         );
         eprintln!("TRserial tray fallback kept the window visible");

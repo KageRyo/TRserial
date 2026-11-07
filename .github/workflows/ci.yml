@@ -79,7 +79,8 @@ jobs:
           sudo apt-get install -y libfontconfig-dev libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev libvulkan1 mesa-vulkan-drivers xvfb xauth dbus-x11 fonts-noto-cjk
       - run: cargo fmt --all --check
       - run: cargo clippy --locked -p trserial-desktop --all-targets --all-features -- -D warnings
-      - run: cargo test --locked -p trserial-desktop
+      - name: Desktop state and UI tests
+        run: cargo test --locked -p trserial-desktop -- --test-threads=1
       - run: cargo build --locked -p trserial-desktop
       - name: Linux native pages and tray lifecycle
         if: runner.os == 'Linux'
@@ -90,6 +91,10 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          & .\target\debug\trserial-desktop.exe --data-dir .trserial\ci-gui --smoke-test
-          if ($LASTEXITCODE -ne 0) { throw 'Native desktop smoke test failed' }
+          $gui = Start-Process -FilePath .\target\debug\trserial-desktop.exe -ArgumentList '--data-dir .trserial\ci-gui --smoke-test' -NoNewWindow -PassThru
+          if (-not $gui.WaitForExit(90000)) {
+            $gui.Kill($true)
+            throw 'Native desktop smoke test timed out'
+          }
+          if ($gui.ExitCode -ne 0) { throw "Native desktop smoke test failed: $($gui.ExitCode)" }
       - run: cargo build --locked --release -p trserial-desktop

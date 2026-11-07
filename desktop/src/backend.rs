@@ -724,7 +724,10 @@ mod tests {
             }
         })
         .await
-        .expect("desktop state did not settle")
+        .unwrap_or_else(|_| {
+            let p = backend.snapshot();
+            panic!("desktop state did not settle: state={:?}, loaded={}, busy={}, closed={}, revision={}, error={:?}", p.state, p.data.is_some(), p.busy, p.closed, p.revision, p.error);
+        })
     }
     #[tokio::test]
     async fn consumed_confirmation_does_not_reopen_and_attempt_requests_are_fresh() {

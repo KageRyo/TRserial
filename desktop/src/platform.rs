@@ -98,6 +98,30 @@ pub(crate) fn set_login(enabled: bool, dir: &Path) -> Result<()> {
     }
 }
 
+/// Keep the GPUI window alive while the Windows shell hides its HWND.
+#[cfg(windows)]
+pub(crate) fn set_window_visible(window: &gpui_kit::Window, visible: bool) -> Result<()> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        IsWindowVisible, SW_HIDE, SW_SHOW, ShowWindow,
+    };
+    let handle = HasWindowHandle::window_handle(window)?;
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        anyhow::bail!("無法取得 TRserial 的 Windows 視窗");
+    };
+    // GPUI owns this live HWND; the call runs on its UI thread and keeps ownership intact.
+    // ShowWindow returns the previous visibility, not a success/failure flag.
+    let hwnd = handle.hwnd.get() as _;
+    unsafe {
+        ShowWindow(hwnd, if visible { SW_SHOW } else { SW_HIDE });
+        ensure!(
+            (IsWindowVisible(hwnd) != 0) == visible,
+            "無法切換 TRserial 視窗顯示狀態"
+        );
+    }
+    Ok(())
+}
+
 /// A watcher alone is insufficient: the shell must host our registered item.
 #[cfg(target_os = "linux")]
 pub(crate) async fn tray_host_available() -> bool {

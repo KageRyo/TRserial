@@ -69,7 +69,15 @@ pub(crate) fn wait(backend: &Backend, ready: impl Fn(&Presentation) -> bool) -> 
             return p;
         }
         assert!(p.error.is_none(), "{}", p.error.unwrap_or_default());
-        assert!(Instant::now() < deadline, "GUI action did not settle");
+        assert!(
+            Instant::now() < deadline,
+            "GUI action did not settle: state={:?}, loaded={}, busy={}, closed={}, revision={}",
+            p.state,
+            p.data.is_some(),
+            p.busy,
+            p.closed,
+            p.revision
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
 }
