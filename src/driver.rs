@@ -8,7 +8,10 @@ use std::{
     process::Stdio,
     time::Duration,
 };
-use tokio::process::{Child, Command};
+use tokio::{
+    net::TcpStream,
+    process::{Child, Command},
+};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Readiness {
@@ -45,6 +48,24 @@ impl DriverManager {
         self.child.as_ref().and_then(Child::id)
     }
     pub async fn readiness(&self) -> Readiness {
+        // Windows connection refusal can outlast the HTTP client's response timeout.
+        // Probe TCP separately: an accepted but unresponsive service is Invalid, not Missing.
+        let Ok(url) = url::Url::parse(&self.config.webdriver_url) else {
+            return Readiness::Invalid;
+        };
+        let host = url.host_str().unwrap_or_default().trim_matches(['[', ']']);
+        match tokio::time::timeout(
+            Duration::from_secs(5),
+            TcpStream::connect((host, url.port_or_known_default().unwrap_or(80))),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => drop(stream),
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+                return Readiness::Missing;
+            }
+            _ => return Readiness::Invalid,
+        }
         let endpoint = format!("{}/status", self.config.webdriver_url.trim_end_matches('/'));
         match self.client.get(endpoint).send().await {
             Ok(response) if response.status().is_success() => {

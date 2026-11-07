@@ -8,7 +8,7 @@ use trserial::{
     config::Config,
     driver::{DriverManager, Readiness},
 };
-async fn server(body: &'static str) -> (String, tokio::task::JoinHandle<()>) {
+async fn server(body: Option<&'static str>) -> (String, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let task = tokio::spawn(async move {
@@ -17,6 +17,10 @@ async fn server(body: &'static str) -> (String, tokio::task::JoinHandle<()>) {
             tokio::spawn(async move {
                 let mut buf = [0; 4096];
                 let _ = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buf)).await;
+                let Some(body) = body else {
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    return;
+                };
                 let reply = format!(
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
@@ -30,9 +34,10 @@ async fn server(body: &'static str) -> (String, tokio::task::JoinHandle<()>) {
 #[tokio::test]
 async fn validates_webdriver_protocol_without_spawning_over_an_occupied_port() {
     for (body, state) in [
-        (r#"{"value":{"ready":true}}"#, Readiness::Ready),
-        (r#"{"value":{"ready":false}}"#, Readiness::Busy),
-        ("not a WebDriver", Readiness::Invalid),
+        (Some(r#"{"value":{"ready":true}}"#), Readiness::Ready),
+        (Some(r#"{"value":{"ready":false}}"#), Readiness::Busy),
+        (Some("not a WebDriver"), Readiness::Invalid),
+        (None, Readiness::Invalid),
     ] {
         let (url, task) = server(body).await;
         let dir = TempDir::new().unwrap();
