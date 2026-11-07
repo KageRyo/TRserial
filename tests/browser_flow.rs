@@ -199,7 +199,7 @@ async fn real_browser_fills_verifies_submits_and_reads_confirmed_outcomes() {
         webdriver_url: format!("http://127.0.0.1:{port}"),
         headless: true,
         browser_binary: std::env::var("CHROME_BIN").ok(),
-        timeout_seconds: 5,
+        // Keep the desktop timeout: a cold Windows Chrome startup can exceed five seconds.
         notifications: false,
         ..Default::default()
     };
