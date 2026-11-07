@@ -12,19 +12,19 @@ use thirtyfour::prelude::*;
 #[error("{detail}")]
 pub struct RedeemError {
     pub transient: bool,
-    pub detail: &'static str,
+    pub detail: String,
 }
 impl RedeemError {
     pub fn transient(detail: &'static str) -> Self {
         Self {
             transient: true,
-            detail,
+            detail: detail.into(),
         }
     }
     pub fn permanent(detail: &'static str) -> Self {
         Self {
             transient: false,
-            detail,
+            detail: detail.into(),
         }
     }
 }
@@ -42,6 +42,13 @@ pub struct Outcome {
 
 #[async_trait]
 pub trait Redeemer: Send {
+    fn is_live(&self) -> bool {
+        true
+    }
+    async fn shutdown(&mut self) {
+        self.close().await;
+    }
+
     async fn prepare(
         &mut self,
         credentials: &Credentials,
@@ -52,12 +59,20 @@ pub trait Redeemer: Send {
     async fn close(&mut self);
 }
 
+#[derive(Debug)]
+pub struct FormReport {
+    pub missing: Vec<&'static str>,
+    pub verification_present: bool,
+    pub changed_types: Vec<&'static str>,
+}
+
 pub struct BrowserRedeemer {
     config: Config,
     driver: Option<WebDriver>,
     target: String,
     before_url: String,
     expected_fields: Vec<(&'static str, [u8; 32])>,
+    manager: Option<crate::driver::DriverManager>,
 }
 impl BrowserRedeemer {
     pub fn new(config: Config) -> Self {
@@ -67,6 +82,7 @@ impl BrowserRedeemer {
             target: OFFICIAL_URL.into(),
             before_url: String::new(),
             expected_fields: Vec::new(),
+            manager: None,
         }
     }
     /// Only loopback fixtures are allowed; the CLI never accepts a replacement redemption site.
@@ -83,14 +99,129 @@ impl BrowserRedeemer {
             target: target.into(),
             before_url: String::new(),
             expected_fields: Vec::new(),
+            manager: None,
         })
     }
-    fn driver(&self) -> BrowserResult<&WebDriver> {
-        self.driver
-            .as_ref()
-            .ok_or_else(|| RedeemError::permanent("瀏覽器工作階段不存在"))
+    async fn open_page(&mut self) -> BrowserResult<()> {
+        self.close().await;
+        if self.manager.is_none() {
+            let root = crate::config::default_data_dir()
+                .map_err(|_| RedeemError::permanent("無法取得 WebDriver 鎖定目錄"))?
+                .join("driver-locks");
+            self.manager = Some(
+                crate::driver::DriverManager::new(self.config.clone(), root)
+                    .map_err(|_| RedeemError::permanent("WebDriver 設定無效"))?,
+            );
+        }
+        self.manager
+            .as_mut()
+            .unwrap()
+            .ensure_ready()
+            .await
+            .map_err(|e| RedeemError {
+                transient: true,
+                detail: format!("WebDriver：{e}"),
+            })?;
+        let mut caps = DesiredCapabilities::chrome();
+        if self.config.headless {
+            caps.set_headless()
+                .map_err(|_| RedeemError::permanent("無法設定瀏覽器"))?;
+        }
+        if let Some(binary) = &self.config.browser_binary {
+            caps.set_binary(binary)
+                .map_err(|_| RedeemError::permanent("Chrome 執行檔路徑無效"))?;
+        }
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(self.config.timeout_seconds))
+            .build()
+            .map_err(|_| RedeemError::permanent("無法建立本機 WebDriver 用戶端"))?;
+        let driver = WebDriver::builder(&self.config.webdriver_url, caps)
+            .client(client)
+            .request_timeout(Duration::from_secs(self.config.timeout_seconds))
+            .await
+            .map_err(|e| {
+                let message = e.to_string();
+                if message.contains("only supports Chrome version")
+                    || message.contains("Current browser version")
+                {
+                    RedeemError::permanent(
+                        "Chrome 與 ChromeDriver 版本不相符；請執行 doctor 並核對版本",
+                    )
+                } else {
+                    RedeemError::transient(
+                        "Chrome 啟動失敗；請檢查 browser_binary、瀏覽器安裝與沙箱權限",
+                    )
+                }
+            })?;
+        self.driver = Some(driver);
+        let driver = self.driver()?;
+        driver
+            .set_page_load_timeout(Duration::from_secs(self.config.timeout_seconds))
+            .await
+            .map_err(|_| RedeemError::transient("無法設定頁面逾時"))?;
+        driver
+            .set_script_timeout(Duration::from_secs(self.config.timeout_seconds))
+            .await
+            .map_err(|_| RedeemError::transient("無法設定腳本逾時"))?;
+        driver
+            .goto(&self.target)
+            .await
+            .map_err(|_| RedeemError::transient("兌換頁面載入失敗或逾時；請檢查連線"))?;
+        Ok(())
     }
-    async fn check_origin(&self) -> BrowserResult<()> {
+    /// Reads the official page without entering credentials or activating any form control.
+    pub async fn inspect(&mut self) -> BrowserResult<FormReport> {
+        self.open_page().await?;
+        self.check_location().await?;
+        let driver = self.driver()?;
+        // Block accidental keyboard/button submission during this read-only session.
+        driver
+            .execute(
+                "document.addEventListener('submit', e=>e.preventDefault(), true);",
+                vec![],
+            )
+            .await
+            .map_err(|_| RedeemError::permanent("無法設定唯讀檢查"))?;
+        let mut missing = Vec::new();
+        let mut changed_types = Vec::new();
+        for selector in [
+            "form#serial",
+            "form#serial input[name='account']",
+            "form#serial input[name='passward']",
+            "form#serial input[name='code']",
+            "form#serial #btnSend",
+        ] {
+            match driver.find(By::Css(selector)).await {
+                Err(_) => missing.push(selector),
+                Ok(field) if selector != "form#serial" => {
+                    let kind = field.prop("type").await.ok().flatten().unwrap_or_default();
+                    let expected = if selector.contains("passward") {
+                        kind == "password"
+                    } else if selector.ends_with("#btnSend") {
+                        kind == "image" || kind == "submit"
+                    } else {
+                        kind == "text"
+                    };
+                    if !expected {
+                        changed_types.push(selector);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if missing.is_empty() {
+            self.check_origin().await?;
+        }
+        let verification=driver.execute("return !!document.querySelector('.cf-turnstile, [name=cf-turnstile-response], #captcha_img, [name=checkTxt]');",vec![]).await.map_err(|_|RedeemError::permanent("無法讀取驗證控制項"))?.json().as_bool().unwrap_or(false);
+        Ok(FormReport {
+            missing,
+            verification_present: verification,
+            changed_types,
+        })
+    }
+    async fn check_location(&self) -> BrowserResult<()> {
         let current = self
             .driver()?
             .current_url()
@@ -98,8 +229,45 @@ impl BrowserRedeemer {
             .map_err(|_| RedeemError::transient("無法確認頁面位址"))?;
         let target =
             url::Url::parse(&self.target).map_err(|_| RedeemError::permanent("兌換位址錯誤"))?;
-        if current.origin() != target.origin() || current.path() != target.path() {
-            return Err(RedeemError::permanent("頁面已轉址；為保護憑證停止操作"));
+        if current.origin() != target.origin() {
+            return Err(RedeemError {
+                transient: false,
+                detail: format!(
+                    "非預期轉址：預期 {}，目前 {}",
+                    target.origin().ascii_serialization(),
+                    current.origin().ascii_serialization()
+                ),
+            });
+        }
+        if current.path() != target.path() {
+            return Err(RedeemError::permanent(
+                "官方網站內的頁面路徑已轉址；請用 browser-check 檢查",
+            ));
+        }
+        Ok(())
+    }
+    fn driver(&self) -> BrowserResult<&WebDriver> {
+        self.driver
+            .as_ref()
+            .ok_or_else(|| RedeemError::permanent("瀏覽器工作階段不存在"))
+    }
+    async fn check_origin(&self) -> BrowserResult<()> {
+        self.check_location().await?;
+        let target =
+            url::Url::parse(&self.target).map_err(|_| RedeemError::permanent("兌換位址錯誤"))?;
+        let form = self
+            .driver()?
+            .find(By::Css("form#serial"))
+            .await
+            .map_err(|_| {
+                RedeemError::permanent(
+                    "找不到 form#serial；可能是表單改版或 Cloudflare 頁面，請執行 browser-check",
+                )
+            })?;
+        if form.prop("method").await.ok().flatten().as_deref() != Some("post") {
+            return Err(RedeemError::permanent(
+                "form#serial 已不是 POST 表單，停止送出",
+            ));
         }
         let action = self
             .driver()?
@@ -123,35 +291,25 @@ impl BrowserRedeemer {
 }
 #[async_trait]
 impl Redeemer for BrowserRedeemer {
+    fn is_live(&self) -> bool {
+        self.target == OFFICIAL_URL
+    }
+    async fn shutdown(&mut self) {
+        self.close().await;
+        if let Some(manager) = self.manager.as_mut() {
+            manager.shutdown().await;
+        }
+    }
+
     async fn prepare(
         &mut self,
         credentials: &Credentials,
         code: &str,
     ) -> BrowserResult<Preparation> {
         self.close().await;
-        let mut caps = DesiredCapabilities::chrome();
-        if self.config.headless {
-            caps.set_headless()
-                .map_err(|_| RedeemError::permanent("無法設定瀏覽器"))?;
-        }
-        if let Some(binary) = &self.config.browser_binary {
-            caps.set_binary(binary)
-                .map_err(|_| RedeemError::permanent("無法設定瀏覽器路徑"))?;
-        }
-        let driver = WebDriver::new(&self.config.webdriver_url, caps)
-            .await
-            .map_err(|_| RedeemError::transient("無法連線本機 WebDriver"))?;
-        self.driver = Some(driver);
-        let driver = self.driver()?.clone();
-        driver
-            .set_page_load_timeout(Duration::from_secs(self.config.timeout_seconds))
-            .await
-            .map_err(|_| RedeemError::transient("無法設定頁面逾時"))?;
-        driver
-            .goto(&self.target)
-            .await
-            .map_err(|_| RedeemError::transient("兌換頁面載入失敗或逾時"))?;
+        self.open_page().await?;
         self.check_origin().await?;
+        let driver = self.driver()?.clone();
         driver.execute("document.querySelector('form#serial').addEventListener('submit', e => { if (!window.__trserialAllowSubmit) e.preventDefault(); }, true);",vec![]).await.map_err(|_|RedeemError::permanent("無法安裝送出保護"))?;
         for (selector, value) in [
             (
@@ -169,7 +327,22 @@ impl Redeemer for BrowserRedeemer {
             let field = driver
                 .find(By::Css(selector))
                 .await
-                .map_err(|_| RedeemError::permanent("官方表單欄位已變更"))?;
+                .map_err(|_| RedeemError {
+                    transient: false,
+                    detail: format!("表單欄位遺失：{selector}；請執行 browser-check"),
+                })?;
+            let expected_type = if selector.contains("passward") {
+                "password"
+            } else {
+                "text"
+            };
+            if field.prop("type").await.ok().flatten().as_deref() != Some(expected_type) {
+                return Err(RedeemError {
+                    transient: false,
+                    detail: format!("表單欄位類型已變更：{selector}"),
+                });
+            }
+
             field
                 .clear()
                 .await
@@ -263,7 +436,11 @@ return !!check && !!text && check.value === '0' && text.value.trim().length > 0;
                 let _ = driver.accept_alert().await;
                 return Ok(Outcome {
                     status,
-                    detail: response_detail(status),
+                    detail: if status == Status::Unknown {
+                        "網站顯示未辨識的對話框；請核對遊戲紀錄後再決定是否重試"
+                    } else {
+                        response_detail(status)
+                    },
                 });
             }
             // Only inspect the handler response after navigation; never success text in form instructions.
@@ -293,7 +470,7 @@ return !!check && !!text && check.value === '0' && text.value.trim().length > 0;
             if tokio::time::Instant::now() >= deadline {
                 return Ok(Outcome {
                     status: Status::Unknown,
-                    detail: "網站未提供可辨識的確認結果",
+                    detail: "等待網站回覆逾時，或回應文字尚未支援；請核對遊戲紀錄",
                 });
             }
             tokio::time::sleep(Duration::from_millis(250)).await;

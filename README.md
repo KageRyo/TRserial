@@ -52,10 +52,31 @@ Linux 憑證庫需要登入中的 D-Bus 工作階段與已解鎖的 Secret Servi
 安裝 Chrome／Chromium，再從 [Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/) 取得**相符版本**的 ChromeDriver。將 `chromedriver`／`chromedriver.exe` 放入 PATH，先在另一個終端啟動：
 
 ```bash
-chromedriver --port=9515 --allowed-ips=127.0.0.1
+chromedriver --port=9515
 ```
 
-保持這個終端執行。WebDriver 使用本機 HTTP 位址，瀏覽器與驅動程式需自行安裝。
+這是外部管理模式，保持這個終端執行即可。`webdriver_url` 也可設定外部服務使用的路徑前綴，例如 `/wd/hub`。瀏覽器與驅動程式需自行安裝。
+
+也可讓 TRserial 管理 ChromeDriver：
+
+```bash
+trserial --managed-driver browser-check
+# 不在 PATH 時指定執行檔：
+trserial --driver-binary /absolute/path/to/chromedriver browser-check
+```
+
+管理模式先檢查本機 `/status`，已有可用的 WebDriver 就沿用，否則啟動設定的執行檔。啟動時採 ChromeDriver 預設的 loopback 綁定，並以同一使用者共用的端點鎖防止重複啟動。程式結束時會回收自己啟動的程序，外部程序保留；子程序中斷後，下次準備瀏覽器時會重新啟動。啟動失敗與等待就緒都有時間上限。
+
+`--managed-driver` 與 `--driver-binary` 只影響當次執行。若要固定使用管理模式，可在 `init` 顯示的設定檔加入：
+
+```toml
+[driver]
+managed = true
+binary = "/absolute/path/to/chromedriver"
+startup_timeout_seconds = 15
+```
+
+Windows 的 `binary` 可寫成 `"C:/Tools/chromedriver.exe"`。管理模式使用 `http://127.0.0.1:9515`，可在 `webdriver_url` 改用其他本機連接埠。
 
 `trserial init` 會顯示設定檔位置。可參照 [config.example.toml](config.example.toml)，或明確指定：
 
@@ -67,19 +88,51 @@ trserial --config config.example.toml doctor
 
 程式會檢查官方網域、表單目的地與欄位內容。欄位為 `account`、`passward`（官方拼字）、`code`，送出按鈕為 `#btnSend`。
 
-## 新增帳號與第一次 dry run
+## 第一次使用：離線 smoke test
+
+先在獨立資料目錄試跑，測試帳號只存中繼資料：
 
 ```bash
-trserial account add
-# 依序輸入別名、遊戲帳號、密碼；密碼不回顯。
-trserial account add
-trserial account list
-trserial ingest --file examples/message.txt
-trserial code list
-trserial redeem malojam1106 --all --dry-run
+trserial --data-dir .trserial/smoke init
+trserial --data-dir .trserial/smoke account add-test smoke
+trserial --data-dir .trserial/smoke ingest --mock examples/messages.json
+trserial --data-dir .trserial/smoke redeem malojam1106 --account smoke --dry-run
 ```
 
-Dry run 會檢查設定、序號格式、指定帳號及既有工作狀態，列出預計處理的工作。試跑保留佇列原狀，不送出序號，可在安裝 ChromeDriver 前執行。
+這四步只在本機執行。Dry run 會檢查設定、序號格式、指定帳號及既有工作狀態，列出預計工作並保留佇列原狀。測試帳號與 mock 序號都帶有 `test_only` 標記。
+
+也可在另一個全新目錄用單一指令建立測試帳號、匯入範例並執行 dry run：
+
+```bash
+trserial --data-dir .trserial/quick-smoke smoke-test
+```
+
+接著檢查 Chrome 啟動與官方表單。這一步會開啟官方網站，檢查轉址、表單目的地、欄位和驗證控制項，然後關閉瀏覽器；帳密與序號欄位保持原狀：
+
+```bash
+trserial --data-dir .trserial/smoke --managed-driver browser-check
+```
+
+檢查結果會列出缺少的定位與變更的欄位類型，或指出啟動失敗、轉址及驗證中介頁。`doctor` 可另外查看 `/status`、管理模式與驅動程式路徑。
+
+## 準備好後，以單一帳號兌換
+
+正式帳號使用預設的使用者資料目錄，與 smoke test 目錄分開：
+
+```bash
+trserial init
+trserial account add
+# 依序輸入別名、遊戲帳號、密碼；密碼不回顯。
+trserial account list
+```
+
+選定一組真正要兌換的序號後，以 `YOUR_CODE`、`YOUR_ALIAS` 代入：
+
+```bash
+trserial ingest --text "序號: YOUR_CODE"
+trserial redeem YOUR_CODE --account YOUR_ALIAS --dry-run
+trserial --managed-driver redeem YOUR_CODE --account YOUR_ALIAS
+```
 
 新增帳號需要可用的系統憑證庫。若要每次執行才輸入密碼：
 
@@ -123,7 +176,17 @@ trserial status
 trserial daemon
 ```
 
-單次 `redeem` 只處理一輪，暫時失敗的工作會依設定排定下次時間，由 `daemon` 接續。`daemon` 會為所有已確認序號及目前設定的帳號建立工作，因此新增帳號後也會處理舊序號。未經確認的序號會留在待審查清單。
+單次 `redeem` 只處理一輪，暫時失敗的工作會依設定排定下次時間，由 `daemon` 接續。
+
+每個帳號首次執行 daemon 時，會將當時已有的序號記為歷史基準。設定好帳號後，可先執行一次 `trserial daemon --once` 建立基準，再開始匯入新訊息。之後首次發現且已確認的序號才會自動排入；daemon 離線期間新增的序號也會在下次啟動時處理。重貼舊訊息或確認舊候選不會改變發現順序，新加入的帳號也有自己的基準。
+
+若要補抓歷史序號，請明確指定：
+
+```bash
+trserial --managed-driver daemon --backfill --once
+```
+
+升級前已存在的待處理工作會保留，預設留作 `historical`。可用 `history` 查看 `manual`、`new`、`historical` 或 `test_only` 分類，再以 `redeem CODE --account ALIAS` 選定工作，或用 `--backfill` 整批排入。成功、已兌換及過期的帳號／序號組合仍保持完成狀態。
 
 | 狀態 | 意義與後續處理 |
 | --- | --- |
@@ -163,7 +226,7 @@ systemctl --user enable --now trserial.service
 journalctl --user -u trserial.service
 ```
 
-服務需要 `~/.cargo/bin/trserial`、桌面 D-Bus／顯示環境與 ChromeDriver。登入後可用 `systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XAUTHORITY` 匯入圖形工作階段環境；停止服務用 `systemctl --user stop trserial`。
+範例服務會啟用 managed driver。先在該使用者的設定檔中將 `driver.binary` 設為 ChromeDriver 絕對路徑。服務需要 `~/.cargo/bin/trserial`、桌面 D-Bus／顯示環境與 ChromeDriver。登入後可用 `systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XAUTHORITY` 匯入圖形工作階段環境；停止服務用 `systemctl --user stop trserial`。
 
 Windows 可在已登入的 PowerShell 執行 [工作排程範例](examples/windows-task.ps1)：
 
@@ -173,7 +236,7 @@ Windows 可在已登入的 PowerShell 執行 [工作排程範例](examples/windo
 Unregister-ScheduledTask -TaskName TRserial -Confirm:$false
 ```
 
-工作會在使用者登入後，以一般權限執行。ChromeDriver 須另行啟動；背景工作使用系統憑證庫中的密碼。新增、移除帳號或人工重試前，先停止 daemon。
+工作會在使用者登入後，以一般權限執行。範例排程會啟用 managed driver；請在設定檔的 `driver.binary` 填入 ChromeDriver 絕對路徑。背景工作使用系統憑證庫中的密碼。新增、移除帳號或人工重試前，先停止 daemon。
 
 ### 選用剪貼簿監看
 
@@ -193,7 +256,7 @@ trserial ingest --mock examples/messages.json
 trserial daemon --mock examples/messages.json --once
 ```
 
-第二行會處理佇列；若已設定真實帳號，會進入真實瀏覽器流程。只想檢查解析結果時使用 `ingest --mock`，再執行 `redeem ... --dry-run`。
+兩種 mock 指令都只匯入測試資料；`daemon --mock` 匯入後就結束，既有佇列保持原狀。mock 標記會保存在資料庫，即使之後重貼同一序號，仍維持 `test_only`。測試帳號與 mock 序號可用於 dry run 或本機假網頁測試，正式瀏覽器兌換會拒絕這些資料。
 
 待要連接 Discord 時：
 
@@ -214,17 +277,17 @@ Serenity 介接器會接收新訊息，使用相同解析器與去重邏輯。�
 - `history.sqlite`：來源原文、解析獎勵、序號、每帳號工作、嘗試紀錄及 Discord 游標。
 - `worker.lock`：防止同一資料目錄有多個瀏覽器工作同時執行；離開時由作業系統釋放。
 
-資料庫未加密，內含帳號名稱／別名與匯入訊息，請保護資料目錄與備份。Linux 建立目錄時設為僅本人可存取；Windows 使用使用者目錄既有權限。密碼只放系統憑證庫或記憶體，錯誤紀錄使用固定的錯誤類別。
+資料庫未加密，內含帳號名稱／別名與匯入訊息，請保護資料目錄與備份。Linux 建立目錄時設為僅本人可存取；Windows 使用使用者目錄既有權限。密碼只放系統憑證庫或記憶體。錯誤紀錄使用錯誤類別與表單定位，轉址訊息只顯示網域，不回顯查詢參數或網站原始回應。
 
-瀏覽器使用 WebDriver 的暫存設定檔。強制終止程式後，可手動關閉殘留瀏覽器。`.gitignore` 已排除 `.env`、SQLite、本機狀態及指定的瀏覽器設定檔目錄。
+瀏覽器使用 WebDriver 的暫存設定檔。ChromeDriver 被強制終止後，殘留的 Chrome 視窗可手動關閉；已進入送出階段的工作仍會記為 `unknown`。`.gitignore` 已排除 `.env`、SQLite、本機狀態及指定的瀏覽器設定檔目錄。
 
 ## 疑難排解
 
-- **無法連線 WebDriver**：先啟動 ChromeDriver，確認連接埠與版本。`doctor` 會檢查連接埠，版本可用 `chrome --version` 與 `chromedriver --version` 核對。
+- **無法連線 WebDriver**：執行 `doctor` 查看 `/status`；外部管理模式先啟動 ChromeDriver，管理模式則檢查 `driver.binary` 與執行權限。版本可用 `chrome --version` 與 `chromedriver --version` 核對。
 - **憑證庫不可用**：解鎖系統憑證庫／確認 Linux Secret Service；或用 `account add --session-only` 並在互動終端執行。
 - **一直等待驗證**：在瀏覽器完成驗證；headless 模式請改回有視窗模式。
 - **`unknown`**：核對遊戲或官方結果後，需要重試時使用 `retry ID --acknowledge`。
-- **欄位或送出目的地變更**：程式會停止，需更新 `src/browser.rs` 的定位與測試。
+- **欄位或送出目的地變更**：先執行 `browser-check` 取得缺少的定位，再更新 `src/browser.rs` 與測試。
 - **已有程序執行中**：停止同資料目錄的 daemon 後再執行。
 
 ## 開發與驗證

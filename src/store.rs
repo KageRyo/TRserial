@@ -60,13 +60,16 @@ impl Store {
         db.busy_timeout(std::time::Duration::from_secs(5))?;
         db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;")?;
         let version: u32 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        ensure!(version <= 1, "資料庫版本比程式新，請更新 TRserial");
-        if version == 0 {
+        ensure!(version <= 2, "資料庫版本比程式新，請更新 TRserial");
+        if version < 2 {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             // Another process may have migrated while we waited for the write lock.
             let v: u32 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
             if v == 0 {
                 tx.execute_batch(include_str!("../migrations/001_initial.sql"))?;
+            }
+            if v < 2 {
+                tx.execute_batch(include_str!("../migrations/002_desktop_safety.sql"))?;
             }
             tx.commit()?;
         }
@@ -93,9 +96,16 @@ impl Store {
         let mut added = 0;
         for c in codes {
             added += tx.execute(
-                "INSERT OR IGNORE INTO codes VALUES(?1,?2,?3)",
+                "INSERT OR IGNORE INTO codes(code,needs_review,created_at) VALUES(?1,?2,?3)",
                 params![c.code, c.needs_review, now()],
             )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO code_sequence(code) VALUES(?1)",
+                [&c.code],
+            )?;
+            if source == "mock" || source.starts_with("mock:") || source == "discord:mock" {
+                tx.execute("UPDATE codes SET test_only=1 WHERE code=?1", [&c.code])?;
+            }
             // A later, explicit labelled discovery can confirm an ambiguous candidate.
             if !c.needs_review {
                 tx.execute("UPDATE codes SET needs_review=0 WHERE code=?1", [&c.code])?;
@@ -136,10 +146,59 @@ impl Store {
         let tx = self.db.transaction()?;
         let mut added = 0;
         for a in accounts {
-            added += tx.execute("INSERT OR IGNORE INTO jobs(code,account_id,account_alias,status,updated_at) VALUES(?1,?2,?3,'pending',?4)", params![code,a.id,a.alias,now()])?;
+            added += tx.execute("INSERT OR IGNORE INTO jobs(code,account_id,account_alias,status,updated_at,manual) VALUES(?1,?2,?3,'pending',?4,1)", params![code,a.id,a.alias,now()])?;
+            tx.execute(
+                "UPDATE jobs SET manual=1 WHERE code=?1 AND account_id=?2",
+                params![code, a.id],
+            )?;
         }
         tx.commit()?;
         Ok(added)
+    }
+    pub fn test_only(&self, code: &str) -> Result<bool> {
+        Ok(self
+            .db
+            .query_row("SELECT test_only FROM codes WHERE code=?1", [code], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .unwrap_or(false))
+    }
+    /// Baselines are durable and account-specific. Run before any new source ingestion.
+    pub fn initialize_daemon(&mut self, accounts: &[Account]) -> Result<()> {
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        for a in accounts {
+            tx.execute("INSERT OR IGNORE INTO daemon_accounts VALUES(?1,(SELECT COALESCE(MAX(id),0) FROM code_sequence))",[&a.id])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn schedule_daemon(&mut self, accounts: &[Account], backfill: bool) -> Result<usize> {
+        self.initialize_daemon(accounts)?;
+        let tx = self.db.transaction()?;
+        let mut added = 0;
+        for a in accounts.iter().filter(|a| !a.test_only) {
+            added+=tx.execute("INSERT OR IGNORE INTO jobs(code,account_id,account_alias,status,updated_at) SELECT c.code,?1,?2,'pending',?3 FROM codes c JOIN code_sequence s ON s.code=c.code JOIN daemon_accounts d ON d.account_id=?1 WHERE c.needs_review=0 AND c.test_only=0 AND (s.id>d.baseline OR ?4)",params![a.id,a.alias,now(),backfill])?;
+        }
+        tx.commit()?;
+        Ok(added)
+    }
+    pub fn daemon_job_allowed(&self, id: i64, backfill: bool) -> Result<bool> {
+        Ok(self.db.query_row("SELECT j.manual OR ?2 OR COALESCE(s.id>d.baseline,0) FROM jobs j JOIN code_sequence s ON s.code=j.code LEFT JOIN daemon_accounts d ON d.account_id=j.account_id WHERE j.id=?1",params![id,backfill],|r|r.get(0))?)
+    }
+    pub fn job_policy(&self, id: i64) -> Result<&'static str> {
+        let (manual,new,test):(bool,bool,bool)=self.db.query_row("SELECT j.manual,COALESCE(s.id>d.baseline,0),c.test_only FROM jobs j JOIN codes c ON c.code=j.code JOIN code_sequence s ON s.code=j.code LEFT JOIN daemon_accounts d ON d.account_id=j.account_id WHERE j.id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+        Ok(if test {
+            "test_only"
+        } else if manual {
+            "manual"
+        } else if new {
+            "new"
+        } else {
+            "historical"
+        })
     }
     pub fn codes(&self) -> Result<Vec<(String, bool)>> {
         let mut q = self
@@ -209,7 +268,7 @@ impl Store {
         Ok(())
     }
     pub fn retry_reviewed(&self, id: i64) -> Result<()> {
-        ensure!(self.db.execute("UPDATE jobs SET status='pending',attempts=0,submitted=0,next_at=0,detail='使用者確認後重試',updated_at=?1 WHERE id=?2 AND status IN ('unknown','failed')",params![now(),id])? == 1, "僅可重試 unknown 或 failed 工作");
+        ensure!(self.db.execute("UPDATE jobs SET status='pending',attempts=0,submitted=0,next_at=0,manual=1,detail='使用者確認後重試',updated_at=?1 WHERE id=?2 AND status IN ('unknown','failed')",params![now(),id])? == 1, "僅可重試 unknown 或 failed 工作");
         Ok(())
     }
     pub fn cursor(&self, source: &str) -> Result<Option<String>> {

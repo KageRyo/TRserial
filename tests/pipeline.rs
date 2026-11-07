@@ -23,6 +23,7 @@ fn account(id: &str) -> Account {
         alias: format!("Account {id}"),
         username: format!("user{id}"),
         session_only: true,
+        test_only: false,
     }
 }
 fn store(dir: &TempDir) -> Store {
@@ -75,6 +76,9 @@ impl Default for FakeRedeemer {
 }
 #[async_trait]
 impl Redeemer for FakeRedeemer {
+    fn is_live(&self) -> bool {
+        false
+    }
     async fn prepare(&mut self, _: &Credentials, _: &str) -> BrowserResult<Preparation> {
         self.prepare.pop_front().unwrap_or(Ok(Preparation::Ready))
     }
@@ -350,7 +354,7 @@ fn review_gate_and_mock_message_source() {
     s.enqueue("AbC123", &[account("a")]).unwrap();
     assert_eq!(
         s.source_messages().unwrap()[0],
-        ("discord:mock".into(), "AbC123".into())
+        ("mock:discord:mock".into(), "AbC123".into())
     );
     let c = parser::parse("序號: AbC123");
     s.ingest("manual", None, "序號: AbC123", &c).unwrap();
@@ -424,4 +428,128 @@ fn readding_same_username_retains_redemption_identity_but_other_installations_do
         .add("new", "username", "fake", true)
         .unwrap();
     assert_ne!(independent.id, added.id);
+}
+
+struct NoCredentials;
+impl CredentialProvider for NoCredentials {
+    fn get(&self, _: &Account) -> Result<Credentials> {
+        panic!("test data reached credential access")
+    }
+}
+struct LiveGuard;
+#[async_trait]
+impl Redeemer for LiveGuard {
+    async fn prepare(&mut self, _: &Credentials, _: &str) -> BrowserResult<Preparation> {
+        panic!("test data reached live browser")
+    }
+    async fn verification_ready(&mut self) -> BrowserResult<bool> {
+        panic!("live verification")
+    }
+    async fn submit(&mut self) -> BrowserResult<Outcome> {
+        panic!("live submission")
+    }
+    async fn close(&mut self) {}
+}
+#[tokio::test]
+async fn mock_codes_and_test_accounts_are_blocked_before_credentials_or_live_browser() {
+    for test_account in [false, true] {
+        let dir = TempDir::new().unwrap();
+        let mut s = store(&dir);
+        let mut a = account("A");
+        a.test_only = test_account;
+        if test_account {
+            discover(&mut s);
+        } else {
+            source::ingest_source(
+                &mut s,
+                &mut MockSource(vec![Message {
+                    source: "manual".into(),
+                    id: None,
+                    text: "序號: abc123".into(),
+                }]),
+            )
+            .unwrap();
+        }
+        s.enqueue("abc123", std::slice::from_ref(&a)).unwrap();
+        Worker {
+            store: &mut s,
+            config: &config(),
+            redeemer: &mut LiveGuard,
+            credentials: &NoCredentials,
+            notifier: Arc::new(Notices::default()),
+            cancel: CancellationToken::new(),
+        }
+        .run(&[a], None, None)
+        .await
+        .unwrap();
+        assert_eq!(s.jobs().unwrap()[0].status, "failed");
+        assert!(!s.jobs().unwrap()[0].submitted);
+    }
+}
+#[tokio::test]
+async fn daemon_worker_skips_legacy_jobs_and_restart_cannot_resubmit_success() {
+    let dir = TempDir::new().unwrap();
+    let mut s = store(&dir);
+    let accounts = [account("A")];
+    discover(&mut s);
+    s.enqueue("abc123", &accounts).unwrap();
+    rusqlite::Connection::open(dir.path().join("history.sqlite"))
+        .unwrap()
+        .execute("UPDATE jobs SET manual=0", [])
+        .unwrap();
+    s.initialize_daemon(&accounts).unwrap();
+    let text = "序號: new123";
+    s.ingest("manual", None, text, &parser::parse(text))
+        .unwrap();
+    s.schedule_daemon(&accounts, false).unwrap();
+    let mut r = FakeRedeemer::default();
+    for _ in 0..2 {
+        Worker {
+            store: &mut s,
+            config: &config(),
+            redeemer: &mut r,
+            credentials: &FakeCredentials,
+            notifier: Arc::new(Notices::default()),
+            cancel: CancellationToken::new(),
+        }
+        .run_scoped(&accounts, None, None, Some(false))
+        .await
+        .unwrap();
+        drop(s);
+        s = store(&dir);
+        s.recover().unwrap();
+        s.schedule_daemon(&accounts, false).unwrap();
+    }
+    assert_eq!(r.submitted, 1);
+    assert_eq!(s.jobs().unwrap()[0].status, "pending");
+    assert_eq!(s.jobs().unwrap()[1].status, "success");
+}
+
+#[tokio::test]
+async fn headless_verification_failure_explains_how_to_continue_without_submitting() {
+    let dir = TempDir::new().unwrap();
+    let mut s = store(&dir);
+    discover(&mut s);
+    let accounts = [account("A")];
+    s.enqueue("abc123", &accounts).unwrap();
+    let mut r = FakeRedeemer {
+        prepare: VecDeque::from([Ok(Preparation::WaitingVerification)]),
+        ready: false,
+        ..Default::default()
+    };
+    run(
+        &mut s,
+        &Config {
+            headless: true,
+            ..config()
+        },
+        &mut r,
+        &accounts,
+        Arc::new(Notices::default()),
+        CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(r.submitted, 0);
+    assert_eq!(s.jobs().unwrap()[0].status, "failed");
+    assert!(s.jobs().unwrap()[0].detail.contains("headless=false"));
 }
