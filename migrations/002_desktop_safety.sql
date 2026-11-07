@@ -4,7 +4,7 @@ CREATE TABLE code_sequence (
  id INTEGER PRIMARY KEY AUTOINCREMENT,
  code TEXT NOT NULL UNIQUE REFERENCES codes(code)
 );
-INSERT INTO code_sequence(code) SELECT code FROM codes ORDER BY created_at, rowid;
+INSERT INTO code_sequence(code) SELECT code FROM codes ORDER BY created_at ASC, rowid ASC;
 CREATE TABLE daemon_accounts (
  account_id TEXT PRIMARY KEY,
  baseline INTEGER NOT NULL

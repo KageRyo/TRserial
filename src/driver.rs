@@ -124,7 +124,7 @@ impl DriverManager {
         if self.child.is_some() {
             self.shutdown().await;
         }
-        crate::config::prepare_dir(&self.lock_root)?;
+        let root = self.lock_root.clone();
         let key = format!(
             "{:x}",
             Sha256::digest(
@@ -133,12 +133,17 @@ impl DriverManager {
                     .as_bytes()
             )
         );
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(self.lock_root.join(format!("{key}.lock")))?;
+        let lock = tokio::task::spawn_blocking(move || -> Result<File> {
+            crate::config::prepare_dir(&root)?;
+            Ok(OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(root.join(format!("{key}.lock")))?)
+        })
+        .await
+        .context("WebDriver 鎖檔工作中斷")??;
         let deadline = tokio::time::Instant::now()
             + Duration::from_secs(self.config.driver.startup_timeout_seconds);
         loop {

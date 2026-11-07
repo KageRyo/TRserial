@@ -345,14 +345,16 @@ async fn managed_driver_owns_only_its_child_prevents_duplicates_and_recovers_aft
     borrower.shutdown().await;
     assert_eq!(owner.readiness().await, Readiness::Ready);
     #[cfg(unix)]
-    let status = Command::new("kill")
+    let status = tokio::process::Command::new("kill")
         .args(["-9", &old_pid.to_string()])
         .status()
+        .await
         .unwrap();
     #[cfg(windows)]
-    let status = Command::new("taskkill")
+    let status = tokio::process::Command::new("taskkill")
         .args(["/PID", &old_pid.to_string(), "/F"])
         .status()
+        .await
         .unwrap();
     assert!(status.success());
     owner.ensure_ready().await.unwrap();
