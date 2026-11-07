@@ -4,12 +4,17 @@ use crate::{
 };
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{
+    ActiveTheme, Disableable, StyledExt,
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
+    h_flex,
     input::InputState,
-    *,
+    v_flex,
 };
-use gpui_kit::*;
+use gpui_kit::{
+    Context, Entity, InteractiveElement, IntoElement, ParentElement, Render, Styled, Subscription,
+    Window, div, rems,
+};
 
 pub(crate) struct SettingsPage {
     controller: Entity<Controller>,

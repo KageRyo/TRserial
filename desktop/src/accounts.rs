@@ -4,13 +4,18 @@ use crate::{
 };
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{
+    Disableable, StyledExt,
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
+    h_flex,
     input::InputState,
     table::{DataTable, TableEvent, TableState},
-    *,
+    v_flex,
 };
-use gpui_kit::*;
+use gpui_kit::{
+    AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render, Styled,
+    Subscription, Window, div,
+};
 use zeroize::Zeroizing;
 
 pub(crate) struct AccountsPage {

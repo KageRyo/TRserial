@@ -3,13 +3,18 @@ use crate::{
     ui::{self, Controller, Row, Rows},
 };
 use gpui_kit::component::{
+    Disableable, IndexPath, WindowExt,
     button::Button,
+    h_flex,
     input::{Input, InputEvent, InputState},
     select::{Select, SelectEvent, SelectState},
     table::{DataTable, TableEvent, TableState},
-    *,
+    v_flex,
 };
-use gpui_kit::*;
+use gpui_kit::{
+    AppContext, Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Window,
+    div,
+};
 
 const STATUSES: [(&str, &str); 9] = [
     ("全部狀態", ""),

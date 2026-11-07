@@ -1,12 +1,16 @@
 use crate::backend::{Backend, Command, Presentation};
 use gpui_kit::component::{
+    ActiveTheme, Sizable, StyledExt, WindowExt,
     button::Button,
     dialog::DialogButtonProps,
     input::{Input, InputContentType, InputState},
     table::{Column, TableDelegate, TableState},
-    *,
+    v_flex,
 };
-use gpui_kit::*;
+use gpui_kit::{
+    App, AppContext, Context, Div, Entity, InteractiveElement, IntoElement, ParentElement,
+    SharedString, Stateful, Styled, Window, actions, div,
+};
 
 pub(crate) struct Controller {
     pub(crate) backend: Backend,

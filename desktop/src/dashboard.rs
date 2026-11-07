@@ -3,8 +3,11 @@ use crate::{
     ui::{self, Controller, ShowCodes, ShowHistory, ShowSettings},
 };
 use gpui_kit::component::scroll::ScrollableElement;
-use gpui_kit::component::{button::Button, *};
-use gpui_kit::*;
+use gpui_kit::component::{Disableable, StyledExt, button::Button, h_flex, v_flex};
+use gpui_kit::{
+    Context, Entity, InteractiveElement, IntoElement, ParentElement, Render, Styled, Subscription,
+    Window, div,
+};
 
 pub(crate) struct Dashboard {
     controller: Entity<Controller>,

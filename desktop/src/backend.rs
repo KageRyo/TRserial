@@ -229,16 +229,22 @@ impl Backend {
     pub(crate) fn snapshot(&self) -> Presentation {
         self.presentation
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
     fn publish(&self, update: impl FnOnce(&mut Presentation)) {
-        let mut state = self.presentation.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self
+            .presentation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         update(&mut state);
         state.revision = state.revision.wrapping_add(1);
     }
     pub(crate) fn consume_plan(&self, serial: u64) -> Option<RedemptionPlan> {
-        let mut state = self.presentation.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self
+            .presentation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if state.plan.as_ref().is_some_and(|(id, _)| *id == serial) {
             state.revision = state.revision.wrapping_add(1);
             state.plan.take().map(|(_, plan)| plan)
@@ -654,10 +660,9 @@ fn start_worker(
                     if let Some(plan)=manual.as_ref() {
                         session.sweep(&mut store,&selected,RunScope::manual(Some(&plan.code),None),worker_cancel.clone(),&StoredCredentials).await?;
                         break;
-                    } else {
-                        store.schedule_daemon(&selected,backfill)?;
-                        session.sweep(&mut store,&selected,RunScope::automatic(backfill),worker_cancel.clone(),&StoredCredentials).await?;
                     }
+                    store.schedule_daemon(&selected,backfill)?;
+                    session.sweep(&mut store,&selected,RunScope::automatic(backfill),worker_cancel.clone(),&StoredCredentials).await?;
                     tokio::select! {_=worker_cancel.cancelled()=>break,_=tokio::time::sleep(Duration::from_secs(2))=>{}}
                 }
                 Ok(())

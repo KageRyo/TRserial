@@ -4,13 +4,18 @@ use crate::{
 };
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{
+    Disableable, StyledExt, WindowExt,
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
+    h_flex,
     input::{Input, InputState, Textarea, TextareaState},
     table::{DataTable, TableEvent, TableState},
-    *,
+    v_flex,
 };
-use gpui_kit::*;
+use gpui_kit::{
+    AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render,
+    SharedString, Styled, Subscription, Window, div,
+};
 use std::collections::HashSet;
 
 pub(crate) struct CodesPage {

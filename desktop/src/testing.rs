@@ -2,7 +2,10 @@ use crate::{
     backend::{Backend, Presentation},
     ui::Controller,
 };
-use gpui_kit::*;
+use gpui_kit::{
+    AnyWindowHandle, App, AppContext, Bounds, Entity, Render, TestAppContext, Window, WindowBounds,
+    WindowOptions, px, size,
+};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 

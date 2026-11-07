@@ -5,14 +5,23 @@ use crate::{
     dashboard::Dashboard,
     history::HistoryPage,
     settings::SettingsPage,
-    ui::{self, Controller, Page, *},
+    ui::{
+        self, Controller, HideWindow, Page, QuitApp, ShowAccounts, ShowCodes, ShowDashboard,
+        ShowHistory, ShowSettings, ShowWindow, StopProcessing, ToggleProcessing,
+    },
 };
 use gpui_kit::component::{
+    ActiveTheme, Disableable, Sizable, StyledExt, Theme, ThemeMode,
     button::{Button, ButtonVariants},
+    h_flex,
     sidebar::{Sidebar, SidebarFooter, SidebarHeader, SidebarMenu, SidebarMenuItem},
-    *,
+    v_flex,
 };
-use gpui_kit::*;
+use gpui_kit::{
+    AnyWindowHandle, App, AppContext, AsyncApp, Context, Entity, Global, IntoElement, KeyBinding,
+    MenuItem, NoAction, ParentElement, QuitMode, Render, Styled, Subscription, Task,
+    TitlebarOptions, Window, WindowBounds, WindowOptions, div, px, size,
+};
 use gpui_tray::{Icon, Tray};
 use std::time::Duration;
 
@@ -298,6 +307,47 @@ fn icon() -> gpui_tray::Result<Icon> {
     Icon::from_rgba(rgba, 32, 32).build()
 }
 
+fn synchronize(snapshot: &crate::backend::Presentation, cx: &mut App) -> bool {
+    let controller = cx.global::<DesktopApp>().controller.clone();
+    let revision = controller.read(cx).presentation.revision;
+    if snapshot.revision != revision {
+        let old_dark = controller.read(cx).presentation.preferences.dark;
+        controller.update(cx, |c, cx| {
+            c.presentation = snapshot.clone();
+            cx.notify();
+        });
+        if old_dark != snapshot.preferences.dark {
+            Theme::change(
+                if snapshot.preferences.dark {
+                    ThemeMode::Dark
+                } else {
+                    ThemeMode::Light
+                },
+                None,
+                cx,
+            );
+        }
+        if let Some(tray) = cx.global::<DesktopApp>().tray.clone() {
+            let _ = tray.refresh_menu(cx);
+        }
+    }
+    if cx.global::<DesktopApp>().window.is_none()
+        && !tray_available(cx)
+        && !cx.global::<DesktopApp>().quitting
+    {
+        show(cx);
+    }
+    if snapshot.closed && cx.global::<DesktopApp>().quitting {
+        if let Some(tray) = cx.global::<DesktopApp>().tray.clone() {
+            let _ = tray.close(cx);
+        }
+        cx.quit();
+        true
+    } else {
+        false
+    }
+}
+
 pub(crate) fn run(backend: Backend, smoke: bool) {
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
@@ -360,46 +410,7 @@ pub(crate) fn run(backend: Backend, smoke: bool) {
                         .timer(Duration::from_millis(160))
                         .await;
                     let snapshot = polling_backend.snapshot();
-                    let exit = cx.update(|cx| {
-                        let controller = cx.global::<DesktopApp>().controller.clone();
-                        let revision = controller.read(cx).presentation.revision;
-                        if snapshot.revision != revision {
-                            let old_dark = controller.read(cx).presentation.preferences.dark;
-                            controller.update(cx, |c, cx| {
-                                c.presentation = snapshot.clone();
-                                cx.notify();
-                            });
-                            if old_dark != snapshot.preferences.dark {
-                                Theme::change(
-                                    if snapshot.preferences.dark {
-                                        ThemeMode::Dark
-                                    } else {
-                                        ThemeMode::Light
-                                    },
-                                    None,
-                                    cx,
-                                );
-                            }
-                            if let Some(tray) = cx.global::<DesktopApp>().tray.clone() {
-                                let _ = tray.refresh_menu(cx);
-                            }
-                        }
-                        if cx.global::<DesktopApp>().window.is_none()
-                            && !tray_available(cx)
-                            && !cx.global::<DesktopApp>().quitting
-                        {
-                            show(cx);
-                        }
-                        if snapshot.closed && cx.global::<DesktopApp>().quitting {
-                            if let Some(tray) = cx.global::<DesktopApp>().tray.clone() {
-                                let _ = tray.close(cx);
-                            }
-                            cx.quit();
-                            true
-                        } else {
-                            false
-                        }
-                    });
+                    let exit = cx.update(|cx| synchronize(&snapshot, cx));
                     if exit {
                         break;
                     }
@@ -438,110 +449,6 @@ pub(crate) fn run(backend: Backend, smoke: bool) {
                 .detach();
             }
         });
-}
-
-#[cfg(all(test, target_os = "linux"))]
-mod native_render_tests {
-    use super::Shell;
-    use crate::{
-        backend::Command,
-        testing::{Fixture, wait},
-        ui::{Controller, Page},
-    };
-    use gpui_kit::component::{Theme, ThemeMode};
-    use gpui_kit::test::TestWindowExt;
-    use gpui_kit::{AppContext, Bounds, HeadlessAppContext, WindowBounds, WindowOptions, px, size};
-    use std::{path::PathBuf, sync::Arc};
-
-    #[test]
-    #[ignore = "requires GPUI's real Vulkan renderer and installed CJK fonts"]
-    fn capture_all_pages_with_native_renderer() {
-        let fixture = Fixture::new();
-        fixture.backend.send(Command::AddAccount {
-            alias: "測試帳號".into(),
-            username: "fixture-user".into(),
-            password: zeroize::Zeroizing::new("fake".into()),
-        });
-        wait(&fixture.backend, |p| {
-            p.data.as_ref().is_some_and(|d| !d.accounts.is_empty())
-        });
-        fixture.backend.send(Command::Ingest(
-            "序號: DesktopSmoke1\n獎勵: 測試資料\n到期: 2026-12-31".into(),
-        ));
-        let p = wait(&fixture.backend, |p| {
-            p.data.as_ref().is_some_and(|d| !d.codes.is_empty())
-        });
-        let account = p.data.unwrap().accounts[0].account.clone();
-        let mut store =
-            trserial::store::Store::open(&fixture.dir.path().join("history.sqlite")).unwrap();
-        store.enqueue("DesktopSmoke1", &[account]).unwrap();
-        let id = store.jobs().unwrap()[0].id;
-        store.claim(id, 3).unwrap();
-        store.mark_submitted(id).unwrap();
-        store
-            .finish(
-                id,
-                trserial::store::Status::Unknown,
-                "本機測試：結果待核對",
-                0,
-            )
-            .unwrap();
-        wait(&fixture.backend, |p| {
-            p.data.as_ref().is_some_and(|d| !d.jobs.is_empty())
-        });
-        let mut cx = HeadlessAppContext::with_platform(
-            gpui_kit::platform::current_platform(true).text_system(),
-            Arc::new(gpui_kit::assets::Assets),
-            gpui_kit::platform::current_headless_renderer,
-        );
-        cx.update(gpui_kit::init);
-        cx.update(|cx| Theme::update(cx, |theme| theme.font_family = "Noto Sans CJK TC".into()));
-        let (window, controller) = cx.update(|cx| {
-            let controller = cx.new(|_| Controller::new(fixture.backend.clone()));
-            let (window, _) = gpui_kit::open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(Bounds {
-                        origin: Default::default(),
-                        size: size(px(1100.), px(760.)),
-                    })),
-                    show: false,
-                    focus: false,
-                    ..Default::default()
-                },
-                cx,
-                |window, cx| cx.new(|cx| Shell::new(controller.clone(), window, cx)),
-            )
-            .unwrap();
-            (window, controller)
-        });
-        let destination = std::env::var_os("TRSERIAL_SCREENSHOTS")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("target/desktop-screenshots"));
-        std::fs::create_dir_all(&destination).unwrap();
-        for (theme_name, theme) in [("light", ThemeMode::Light), ("dark", ThemeMode::Dark)] {
-            cx.update(|cx| Theme::change(theme, None, cx));
-            for (name, page) in [
-                ("dashboard", Page::Dashboard),
-                ("accounts", Page::Accounts),
-                ("codes", Page::Codes),
-                ("history", Page::History),
-                ("settings", Page::Settings),
-            ] {
-                cx.update(|cx| {
-                    controller.update(cx, |c, cx| {
-                        c.page = page;
-                        cx.notify();
-                    })
-                });
-                cx.update_window(window, |_, window, cx| window.render_frame(cx))
-                    .unwrap();
-                cx.capture_screenshot(window)
-                    .unwrap()
-                    .save(destination.join(format!("{name}-{theme_name}.png")))
-                    .unwrap();
-            }
-        }
-    }
 }
 
 async fn wait_smoke(
@@ -674,4 +581,108 @@ async fn native_smoke(backend: &Backend, cx: &mut AsyncApp) -> anyhow::Result<()
     backend.smoke_complete();
     eprintln!("TRserial native pages, persisted state, worker start/pause/stop passed");
     Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod native_render_tests {
+    use super::Shell;
+    use crate::{
+        backend::Command,
+        testing::{Fixture, wait},
+        ui::{Controller, Page},
+    };
+    use gpui_kit::component::{Theme, ThemeMode};
+    use gpui_kit::test::TestWindowExt;
+    use gpui_kit::{AppContext, Bounds, HeadlessAppContext, WindowBounds, WindowOptions, px, size};
+    use std::{path::PathBuf, sync::Arc};
+
+    #[test]
+    #[ignore = "requires GPUI's real Vulkan renderer and installed CJK fonts"]
+    fn capture_all_pages_with_native_renderer() {
+        let fixture = Fixture::new();
+        fixture.backend.send(Command::AddAccount {
+            alias: "測試帳號".into(),
+            username: "fixture-user".into(),
+            password: zeroize::Zeroizing::new("fake".into()),
+        });
+        wait(&fixture.backend, |p| {
+            p.data.as_ref().is_some_and(|d| !d.accounts.is_empty())
+        });
+        fixture.backend.send(Command::Ingest(
+            "序號: DesktopSmoke1\n獎勵: 測試資料\n到期: 2026-12-31".into(),
+        ));
+        let p = wait(&fixture.backend, |p| {
+            p.data.as_ref().is_some_and(|d| !d.codes.is_empty())
+        });
+        let account = p.data.unwrap().accounts[0].account.clone();
+        let mut store =
+            trserial::store::Store::open(&fixture.dir.path().join("history.sqlite")).unwrap();
+        store.enqueue("DesktopSmoke1", &[account]).unwrap();
+        let id = store.jobs().unwrap()[0].id;
+        store.claim(id, 3).unwrap();
+        store.mark_submitted(id).unwrap();
+        store
+            .finish(
+                id,
+                trserial::store::Status::Unknown,
+                "本機測試：結果待核對",
+                0,
+            )
+            .unwrap();
+        wait(&fixture.backend, |p| {
+            p.data.as_ref().is_some_and(|d| !d.jobs.is_empty())
+        });
+        let mut cx = HeadlessAppContext::with_platform(
+            gpui_kit::platform::current_platform(true).text_system(),
+            Arc::new(gpui_kit::assets::Assets),
+            gpui_kit::platform::current_headless_renderer,
+        );
+        cx.update(gpui_kit::init);
+        cx.update(|cx| Theme::update(cx, |theme| theme.font_family = "Noto Sans CJK TC".into()));
+        let (window, controller) = cx.update(|cx| {
+            let controller = cx.new(|_| Controller::new(fixture.backend.clone()));
+            let (window, _) = gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Default::default(),
+                        size: size(px(1100.), px(760.)),
+                    })),
+                    show: false,
+                    focus: false,
+                    ..Default::default()
+                },
+                cx,
+                |window, cx| cx.new(|cx| Shell::new(controller.clone(), window, cx)),
+            )
+            .unwrap();
+            (window, controller)
+        });
+        let destination = std::env::var_os("TRSERIAL_SCREENSHOTS")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("target/desktop-screenshots"));
+        std::fs::create_dir_all(&destination).unwrap();
+        for (theme_name, theme) in [("light", ThemeMode::Light), ("dark", ThemeMode::Dark)] {
+            cx.update(|cx| Theme::change(theme, None, cx));
+            for (name, page) in [
+                ("dashboard", Page::Dashboard),
+                ("accounts", Page::Accounts),
+                ("codes", Page::Codes),
+                ("history", Page::History),
+                ("settings", Page::Settings),
+            ] {
+                cx.update(|cx| {
+                    controller.update(cx, |c, cx| {
+                        c.page = page;
+                        cx.notify();
+                    })
+                });
+                cx.update_window(window, |_, window, cx| window.render_frame(cx))
+                    .unwrap();
+                cx.capture_screenshot(window)
+                    .unwrap()
+                    .save(destination.join(format!("{name}-{theme_name}.png")))
+                    .unwrap();
+            }
+        }
+    }
 }
