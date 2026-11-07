@@ -3154,6 +3154,7 @@ dependencies = [
  "keyring",
  "notify-rust",
  "regex",
+ "reqwest 0.13.5",
  "rpassword",
  "rusqlite",
  "serde",

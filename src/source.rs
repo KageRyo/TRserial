@@ -25,7 +25,11 @@ impl MessageSource for ManualSource {
 pub struct MockSource(pub Vec<Message>);
 impl MessageSource for MockSource {
     fn messages(&mut self) -> Result<Vec<Message>> {
-        Ok(std::mem::take(&mut self.0))
+        let mut messages = std::mem::take(&mut self.0);
+        for message in &mut messages {
+            message.source = format!("mock:{}", message.source);
+        }
+        Ok(messages)
     }
 }
 pub fn ingest(store: &mut Store, message: &Message) -> Result<usize> {

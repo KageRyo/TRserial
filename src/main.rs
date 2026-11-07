@@ -7,7 +7,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use trserial::{
     accounts::{Accounts, prompt},
-    browser::BrowserRedeemer,
+    browser::{BrowserRedeemer, Redeemer},
     config::{self, Config},
     notifications::{self, Notifier},
     parser,
@@ -27,6 +27,14 @@ struct Cli {
         help = "設定檔路徑（預設為資料目錄內 config.toml）"
     )]
     config: Option<PathBuf>,
+    #[arg(long, global = true, help = "本次執行自動管理 ChromeDriver")]
+    managed_driver: bool,
+    #[arg(
+        long,
+        global = true,
+        help = "ChromeDriver 執行檔，同時啟用 managed 模式"
+    )]
+    driver_binary: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -37,6 +45,10 @@ enum Command {
         #[arg(long)]
         test_notification: bool,
     },
+    /// Open and inspect the official form, with no account access or submission.
+    BrowserCheck,
+    /// Offline first-run workflow in a fresh data directory.
+    SmokeTest,
     Account {
         #[command(subcommand)]
         command: AccountCommand,
@@ -77,14 +89,20 @@ enum Command {
     Daemon {
         #[arg(long)]
         once: bool,
-        #[arg(long)]
+        #[arg(long,conflicts_with_all=["backfill","clipboard"])]
         mock: Option<PathBuf>,
         #[arg(long)]
         clipboard: bool,
+        #[arg(long, help = "為所有現有帳號排入已確認的歷史序號")]
+        backfill: bool,
     },
 }
 #[derive(Subcommand)]
 enum AccountCommand {
+    /// Add metadata for dry runs; no password or OS credential store access.
+    AddTest {
+        alias: String,
+    },
     Add {
         #[arg(long)]
         session_only: bool,
@@ -114,7 +132,14 @@ async fn main() -> Result<()> {
     if matches!(cli.command, Command::Init) && !config_path.exists() {
         std::fs::write(&config_path, toml::to_string_pretty(&Config::default())?)?;
     }
-    let config = Config::load(&config_path)?;
+    let mut config = Config::load(&config_path)?;
+    if cli.managed_driver || cli.driver_binary.is_some() {
+        config.driver.managed = true;
+    }
+    if let Some(binary) = cli.driver_binary {
+        config.driver.binary = binary;
+    }
+    config.validate()?;
     let accounts = Accounts::open(&dir)?;
     let mut store = Store::open(&dir.join("history.sqlite"))?;
     match cli.command {
@@ -124,7 +149,66 @@ async fn main() -> Result<()> {
             config_path.display()
         ),
         Command::Doctor { test_notification } => doctor(&config, &dir, test_notification).await?,
+        Command::BrowserCheck => {
+            let _lock = WorkerLock::acquire(&dir)?;
+            let cancel = cancellation();
+            let mut browser = BrowserRedeemer::new(config.clone());
+            let result = tokio::select! {
+                _=cancel.cancelled()=>Err(anyhow::anyhow!("瀏覽器檢查已取消")),
+                result=tokio::time::timeout(Duration::from_secs(config.timeout_seconds+config.driver.startup_timeout_seconds+5),browser.inspect())=>match result {Ok(report)=>report.map_err(Into::into),Err(_)=>Err(anyhow::anyhow!("瀏覽器檢查逾時"))},
+            };
+            browser.shutdown().await;
+            let report = result?;
+            println!(
+                "官方頁面：{}\n驗證控制項：{}",
+                config::OFFICIAL_URL,
+                if report.verification_present {
+                    "已找到；兌換時由使用者完成驗證"
+                } else {
+                    "未顯示"
+                }
+            );
+            ensure!(
+                report.missing.is_empty() && report.changed_types.is_empty(),
+                "表單異常：缺少定位 [{}]；欄位類型變更 [{}]。請檢查表單改版或驗證中介頁",
+                report.missing.join(", "),
+                report.changed_types.join(", ")
+            );
+            println!("表單與欄位檢查通過；未填入帳密或序號，未送出表單。");
+        }
+        Command::SmokeTest => {
+            let _lock = WorkerLock::acquire(&dir)?;
+            ensure!(
+                accounts.list()?.is_empty()
+                    && store.codes()?.is_empty()
+                    && store.jobs()?.is_empty(),
+                "smoke-test 需使用全新的 --data-dir"
+            );
+            accounts.add_test("smoke")?;
+            source::ingest_source(
+                &mut store,
+                &mut MockSource(vec![source::Message {
+                    source: "smoke".into(),
+                    id: None,
+                    text: include_str!("../examples/message.txt").into(),
+                }]),
+            )?;
+            let selected = accounts.list()?;
+            for (code, _) in store.codes()? {
+                show_dry_run(&store, &code, &selected)?;
+            }
+            println!(
+                "離線 smoke test：測試帳號 smoke；已解析範例訊息；佇列與嘗試紀錄皆為零。\n下一步：trserial --data-dir {} redeem malojam1106 --account smoke --dry-run\n瀏覽器檢查：trserial --data-dir {} browser-check",
+                dir.display(),
+                dir.display()
+            );
+        }
         Command::Account { command } => match command {
+            AccountCommand::AddTest { alias } => {
+                let _lock = WorkerLock::acquire(&dir)?;
+                accounts.add_test(&alias)?;
+                println!("已新增測試帳號 {alias}，可供 dry run 使用。");
+            }
             AccountCommand::Add { session_only } => {
                 let _lock = WorkerLock::acquire(&dir)?;
                 let alias = prompt("帳號別名")?;
@@ -147,7 +231,9 @@ async fn main() -> Result<()> {
                         "{}\t{}\t{}",
                         a.alias,
                         a.username,
-                        if a.session_only {
+                        if a.test_only {
+                            "測試帳號（dry run）"
+                        } else if a.session_only {
                             "每次詢問密碼"
                         } else {
                             "系統憑證庫"
@@ -179,7 +265,13 @@ async fn main() -> Result<()> {
                 for (code, review) in store.codes()? {
                     println!(
                         "{code}\t{}",
-                        if review { "needs_review" } else { "confirmed" }
+                        if store.test_only(&code)? {
+                            "test_only"
+                        } else if review {
+                            "needs_review"
+                        } else {
+                            "confirmed"
+                        }
                     );
                 }
             }
@@ -200,27 +292,12 @@ async fn main() -> Result<()> {
             );
             let selected = select_accounts(&accounts, account.as_deref())?;
             if dry_run {
-                ensure!(
-                    !store
-                        .codes()?
-                        .iter()
-                        .any(|(c, review)| c == &code && *review),
-                    "序號需要人工確認；請先執行 code approve"
-                );
-                for a in &selected {
-                    let prior = store
-                        .jobs()?
-                        .into_iter()
-                        .find(|j| j.code == code && j.account_id == a.id);
-                    println!(
-                        "DRY RUN：{} / {} / {}",
-                        code,
-                        a.alias,
-                        prior.map_or("新工作".into(), |j| j.status)
-                    );
-                }
-                println!("未開啟瀏覽器、未讀取密碼、未建立兌換工作、未送出網站。");
+                show_dry_run(&store, &code, &selected)?;
             } else {
+                ensure!(
+                    selected.iter().all(|a| !a.test_only) && !store.test_only(&code)?,
+                    "測試帳號與 mock 序號僅供 dry run 或本機測試使用"
+                );
                 let _lock = WorkerLock::acquire(&dir)?;
                 store.recover()?;
                 if !store.codes()?.iter().any(|(c, _)| c == &code) {
@@ -266,7 +343,13 @@ async fn main() -> Result<()> {
                 for j in store.jobs()? {
                     println!(
                         "{}\t{}\t{}\t{}\tattempts={}\tupdated={}\t{}",
-                        j.id, j.code, j.alias, j.status, j.attempts, j.updated_at, j.detail
+                        j.id,
+                        j.code,
+                        j.alias,
+                        j.status,
+                        j.attempts,
+                        j.updated_at,
+                        format_args!("{} / {}", store.job_policy(j.id)?, j.detail)
                     );
                 }
             }
@@ -300,7 +383,16 @@ async fn main() -> Result<()> {
             once,
             mock,
             clipboard,
+            backfill,
         } => {
+            // Mock mode is ingestion-only, even when this directory already contains live pending jobs.
+            if let Some(path) = mock {
+                println!(
+                    "匯入 {} 組測試序號；mock 模式只匯入，不執行佇列。",
+                    ingest_mock(&mut store, &path)?
+                );
+                return Ok(());
+            }
             #[cfg(not(feature = "clipboard"))]
             ensure!(
                 !clipboard,
@@ -313,9 +405,7 @@ async fn main() -> Result<()> {
             );
             let _lock = WorkerLock::acquire(&dir)?;
             store.recover()?;
-            if let Some(path) = mock {
-                ingest_mock(&mut store, &path)?;
-            }
+            store.initialize_daemon(&accounts.list()?)?;
             #[cfg(feature = "clipboard")]
             let mut clipboard_source = if clipboard {
                 Some(source::ClipboardSource::new()?)
@@ -325,20 +415,23 @@ async fn main() -> Result<()> {
             let cancel = cancellation();
             #[cfg(feature = "discord")]
             let discord = trserial::discord::start(&config.discord, &dir, cancel.clone()).await?;
-            println!("背景處理已啟動；Ctrl+C 結束。只會排入已確認的序號。");
+            let mut browser = BrowserRedeemer::new(config.clone());
+            println!("背景處理已啟動；Ctrl+C 結束。歷史補抓：{}", backfill);
+
             let result:Result<()> = async {
                 loop {
                     #[cfg(feature="clipboard")]
                     if let Some(source)=&mut clipboard_source {source::ingest_source(&mut store,source)?;}
                     let current=accounts.list()?;
-                    for (code,review) in store.codes()? {if !review {store.enqueue(&code,&current)?;}}
-                    run_worker(&mut store,&config,&current,None,None,cancel.clone()).await?;
+                    store.schedule_daemon(&current,backfill)?;
+                    Worker{store:&mut store,config:&config,redeemer:&mut browser,credentials:&SystemCredentials,notifier:notifications::desktop(config.notifications),cancel:cancel.clone()}.run_scoped(&current,None,None,Some(backfill)).await?;
                     if once || cancel.is_cancelled() {break;}
                     tokio::select! {_=cancel.cancelled()=>break,_=tokio::time::sleep(Duration::from_secs(2))=>{}}
                 }
                 Ok(())
             }.await;
             cancel.cancel();
+            browser.shutdown().await;
             #[cfg(feature = "discord")]
             if let Some(task) = discord {
                 let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
@@ -346,6 +439,33 @@ async fn main() -> Result<()> {
             result?;
         }
     }
+    Ok(())
+}
+fn show_dry_run(store: &Store, code: &str, accounts: &[trserial::accounts::Account]) -> Result<()> {
+    ensure!(
+        !store
+            .codes()?
+            .iter()
+            .any(|(c, review)| c == code && *review),
+        "序號需要人工確認；請先執行 code approve"
+    );
+    let jobs = store.jobs()?;
+    for a in accounts {
+        let state = jobs
+            .iter()
+            .find(|j| j.code == code && j.account_id == a.id)
+            .map_or("新工作", |j| j.status.as_str());
+        println!(
+            "DRY RUN：{code} / {} / {state}{}",
+            a.alias,
+            if a.test_only || store.test_only(code)? {
+                "（測試資料）"
+            } else {
+                ""
+            }
+        );
+    }
+    println!("未開啟瀏覽器、未讀取密碼、未建立兌換工作、未送出網站。");
     Ok(())
 }
 fn read_text(path: &Path) -> Result<String> {
@@ -414,7 +534,9 @@ async fn run_worker(
         notifier: notifications::desktop(config.notifications),
         cancel,
     };
-    worker.run(accounts, code, account).await
+    let result = worker.run(accounts, code, account).await;
+    browser.shutdown().await;
+    result
 }
 async fn doctor(config: &Config, dir: &Path, test_notification: bool) -> Result<()> {
     println!(
@@ -424,21 +546,16 @@ async fn doctor(config: &Config, dir: &Path, test_notification: bool) -> Result<
         config.discord.enabled,
         config.notifications
     );
-    let url = url::Url::parse(&config.webdriver_url)?;
-    let addr = format!(
-        "{}:{}",
-        url.host_str().unwrap_or("127.0.0.1"),
-        url.port().unwrap_or(80)
+    let driver = trserial::driver::DriverManager::new(
+        config.clone(),
+        config::default_data_dir()?.join("driver-locks"),
+    )?;
+    println!(
+        "WebDriver /status：{:?}；管理模式：{}；執行檔：{}",
+        driver.readiness().await,
+        config.driver.managed,
+        config.driver.binary.display()
     );
-    match tokio::time::timeout(
-        Duration::from_secs(2),
-        tokio::net::TcpStream::connect(&addr),
-    )
-    .await
-    {
-        Ok(Ok(_)) => println!("WebDriver 連接埠可達：{addr}（未建立瀏覽器或送出表單）"),
-        _ => println!("WebDriver 尚未啟動：{addr}；請先啟動相符版本的 chromedriver"),
-    }
     match keyring::Entry::new("TRserial-doctor", "probe").and_then(|e| e.get_password()) {
         Ok(_) | Err(keyring::Error::NoEntry) => println!("憑證庫可讀取；未寫入測試密碼"),
         Err(_) => {
@@ -449,6 +566,6 @@ async fn doctor(config: &Config, dir: &Path, test_notification: bool) -> Result<
         notifications::DesktopNotifier { enabled: true }
             .send("TRserial — 通知測試", "這是本機測試通知，沒有送出序號。");
     }
-    println!("未測試真實帳號登入或兌換。無圖形桌面時可關閉通知；人工驗證需要可見的瀏覽器。");
+    println!("瀏覽器與表單檢查：trserial browser-check");
     Ok(())
 }

@@ -50,3 +50,13 @@ release 執行檔另測過互動新增假帳號、匯入 `examples/messages.json
 | 自動啟動 | systemd 使用者服務與 Windows 登入排程 |
 
 Ubuntu 與 Windows 的 CI 結果見 [GitHub Actions](https://github.com/KageRyo/TRserial/actions)。
+
+## 2026-11-07：桌面使用加固
+
+本機通過格式檢查、全功能 Clippy、31 項一般測試、2 項瀏覽器／程序整合測試與 release build。
+
+新增測試涵蓋每帳號歷史基準、重啟去重、舊版資料庫待處理工作、mock 資料隔離、測試帳號、WebDriver 狀態協定、啟動失敗、同端點並行啟動、外部程序保留及子程序中斷後重啟。唯讀檢查以本機頁面的輸入事件與 POST 計數確認沒有填寫或送出表單，也測試了欄位遺失與轉址。
+
+在全新資料目錄新增測試帳號、匯入範例並 dry run 後，工作與嘗試紀錄皆為零。另用 managed driver 執行 `browser-check`，官方表單的五個定位與驗證控制項皆可讀取；檢查後 Chrome 與受管理的 ChromeDriver 已結束。
+
+以 `ss` 確認 ChromeDriver 預設只監聽 `127.0.0.1` 與 `::1`。managed 模式採用這個預設，不傳入會改為全介面監聽的 `--allowed-ips`。

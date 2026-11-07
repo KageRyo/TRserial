@@ -13,6 +13,7 @@ pub struct Account {
     pub alias: String,
     pub username: String,
     pub session_only: bool,
+    pub test_only: bool,
 }
 /// Intentionally has no Debug/Serialize implementation.
 pub struct Credentials {
@@ -22,7 +23,8 @@ pub struct Credentials {
 pub struct Accounts(Connection);
 impl Accounts {
     pub fn open(dir: &Path) -> Result<Self> {
-        let db = Connection::open(dir.join("accounts.sqlite"))?;
+        let mut db = Connection::open(dir.join("accounts.sqlite"))?;
+        db.busy_timeout(std::time::Duration::from_secs(5))?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS accounts(id TEXT PRIMARY KEY, alias TEXT NOT NULL UNIQUE, username TEXT NOT NULL, session_only INTEGER NOT NULL);")?;
         db.execute_batch(
             "CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);",
@@ -31,18 +33,26 @@ impl Accounts {
             "INSERT OR IGNORE INTO settings VALUES('identity_seed',?1)",
             [uuid::Uuid::new_v4().to_string()],
         )?;
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let version: u32 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        ensure!(version <= 1, "帳號資料庫版本比程式新");
+        if version == 0 {
+            tx.execute_batch("ALTER TABLE accounts ADD COLUMN test_only INTEGER NOT NULL DEFAULT 0; PRAGMA user_version=1;")?;
+        }
+        tx.commit()?;
         Ok(Self(db))
     }
     pub fn list(&self) -> Result<Vec<Account>> {
-        let mut q = self
-            .0
-            .prepare("SELECT id,alias,username,session_only FROM accounts ORDER BY alias")?;
+        let mut q = self.0.prepare(
+            "SELECT id,alias,username,session_only,test_only FROM accounts ORDER BY alias",
+        )?;
         Ok(q.query_map([], |r| {
             Ok(Account {
                 id: r.get(0)?,
                 alias: r.get(1)?,
                 username: r.get(2)?,
                 session_only: r.get(3)?,
+                test_only: r.get(4)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?)
@@ -81,6 +91,7 @@ impl Accounts {
             alias: alias.into(),
             username: username.into(),
             session_only,
+            test_only: false,
         };
         if !session_only {
             entry(&a)?.set_password(password).map_err(|_| {
@@ -88,7 +99,7 @@ impl Accounts {
             })?;
         }
         if let Err(e) = self.0.execute(
-            "INSERT INTO accounts VALUES(?1,?2,?3,?4)",
+            "INSERT INTO accounts(id,alias,username,session_only) VALUES(?1,?2,?3,?4)",
             params![a.id, a.alias, a.username, a.session_only],
         ) {
             if !session_only {
@@ -97,6 +108,11 @@ impl Accounts {
             return Err(e.into());
         }
         Ok(a)
+    }
+    pub fn add_test(&self, alias: &str) -> Result<()> {
+        ensure!(!alias.trim().is_empty(), "別名不可留白");
+        self.0.execute("INSERT INTO accounts(id,alias,username,session_only,test_only) VALUES(?1,?2,'fixture-user',1,1)",params![format!("test-{}",uuid::Uuid::new_v4()),alias])?;
+        Ok(())
     }
     pub fn remove(&self, alias: &str) -> Result<()> {
         let a = self
@@ -118,6 +134,7 @@ fn entry(a: &Account) -> Result<keyring::Entry> {
     keyring::Entry::new("TRserial", &a.id).map_err(|_| anyhow::anyhow!("作業系統憑證庫無法使用"))
 }
 pub fn credentials(a: &Account) -> Result<Credentials> {
+    ensure!(!a.test_only, "測試帳號僅供 dry run 使用");
     if !a.session_only
         && let Ok(e) = entry(a)
         && let Ok(password) = e.get_password()

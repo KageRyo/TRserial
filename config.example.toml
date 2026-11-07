@@ -16,3 +16,9 @@ notifications = true
 enabled = false
 channels = []
 # 日後啟用需重新編譯 --features discord，並在環境變數提供 TRSERIAL_DISCORD_TOKEN。
+
+# 背景自動啟動時可設 managed = true，binary 請使用絕對路徑。
+[driver]
+managed = false
+binary = "chromedriver"
+startup_timeout_seconds = 15

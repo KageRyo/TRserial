@@ -59,6 +59,16 @@ impl Worker<'_> {
         code_filter: Option<&str>,
         account_filter: Option<&str>,
     ) -> Result<usize> {
+        self.run_scoped(accounts, code_filter, account_filter, None)
+            .await
+    }
+    pub async fn run_scoped(
+        &mut self,
+        accounts: &[Account],
+        code_filter: Option<&str>,
+        account_filter: Option<&str>,
+        daemon_backfill: Option<bool>,
+    ) -> Result<usize> {
         let jobs = self.store.jobs()?;
         let mut processed = 0;
         let mut summary = Vec::new();
@@ -68,6 +78,11 @@ impl Worker<'_> {
             }
             if code_filter.is_some_and(|code| code != job.code)
                 || account_filter.is_some_and(|id| id != job.account_id)
+            {
+                continue;
+            }
+            if let Some(backfill) = daemon_backfill
+                && !self.store.daemon_job_allowed(job.id, backfill)?
             {
                 continue;
             }
@@ -118,6 +133,14 @@ impl Worker<'_> {
         let Some(account) = accounts.iter().find(|a| a.id == job.account_id) else {
             return self.store.finish(job.id, Status::Failed, "帳號已移除", 0);
         };
+        if self.redeemer.is_live() && (account.test_only || self.store.test_only(&job.code)?) {
+            return self.store.finish(
+                job.id,
+                Status::Failed,
+                "測試帳號或 mock 序號僅供本機測試，未開啟瀏覽器",
+                0,
+            );
+        }
         let credentials = match self.credentials.get(account) {
             Ok(c) => c,
             Err(_) => {
@@ -136,10 +159,18 @@ impl Worker<'_> {
         drop(credentials);
         let prep = match prepare {
             Ok(Ok(p)) => p,
-            Ok(Err(e)) => return self.pre_submit_error(job, e.transient, e.detail),
+            Ok(Err(e)) => return self.pre_submit_error(job, e.transient, &e.detail),
             Err(_) => return self.pre_submit_error(job, true, "瀏覽器準備逾時，尚未送出"),
         };
         if prep == Preparation::WaitingVerification {
+            if self.config.headless {
+                return self.store.finish(
+                    job.id,
+                    Status::Failed,
+                    "需要人工驗證；請設定 headless=false 後重試，尚未送出",
+                    0,
+                );
+            }
             self.store.waiting(job.id)?;
             self.notifier.send(
                 "TRserial — 需要人工驗證",
@@ -157,7 +188,7 @@ impl Worker<'_> {
                     return self.store.finish(
                         job.id,
                         Status::Failed,
-                        "人工驗證逾時；尚未送出，可確認後重試",
+                        "人工驗證逾時；請用有視窗模式完成 Cloudflare 驗證後重試",
                         0,
                     );
                 }

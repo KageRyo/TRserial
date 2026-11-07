@@ -35,6 +35,7 @@ impl Drop for Driver {
 struct Fixture {
     url: String,
     posts: Arc<AtomicUsize>,
+    typed: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -45,6 +46,8 @@ impl Fixture {
         listener.set_nonblocking(true).unwrap();
         let posts = Arc::new(AtomicUsize::new(0));
         let posted = posts.clone();
+        let typed = Arc::new(AtomicUsize::new(0));
+        let typing = typed.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
         let thread = std::thread::spawn(move || {
@@ -88,6 +91,9 @@ impl Fixture {
                 }
                 let request = String::from_utf8_lossy(&request);
                 let path = request.split_whitespace().nth(1).unwrap_or("/");
+                if path == "/typed" {
+                    typing.fetch_add(1, Ordering::SeqCst);
+                }
                 let body = if request.starts_with("POST ") {
                     posted.fetch_add(1, Ordering::SeqCst);
                     assert!(request.contains("account=fixture-user"));
@@ -106,26 +112,45 @@ impl Fixture {
                     )
                 } else {
                     let case = path.trim_start_matches('/');
-                    include_str!("fixtures/serial.html")
-                        .replace(
-                            "{{ACTION}}",
-                            &if case == "foreign-action" {
-                                "http://127.0.0.1:1/steal".to_owned()
-                            } else {
-                                format!("/handler/{case}")
-                            },
+                    let page = include_str!("fixtures/serial.html");
+                    let page = if case == "changed" {
+                        page.replace("name=\"code\"", "name=\"changed-code\"")
+                    } else if case == "changed-type" {
+                        page.replace("type=\"password\"", "type=\"text\"")
+                    } else {
+                        page.to_owned()
+                    };
+                    let page = if case == "readonly" {
+                        format!(
+                            "{page}<script>document.querySelectorAll('input').forEach(e=>e.addEventListener('input',()=>fetch('/typed')));</script>"
                         )
-                        .replace(
-                            "{{TOKEN}}",
-                            if case == "waiting" {
-                                ""
-                            } else {
-                                "LOCAL-FIXTURE-TOKEN"
-                            },
-                        )
+                    } else {
+                        page
+                    };
+                    page.replace(
+                        "{{ACTION}}",
+                        &if case == "foreign-action" {
+                            "http://127.0.0.1:1/steal".to_owned()
+                        } else {
+                            format!("/handler/{case}")
+                        },
+                    )
+                    .replace(
+                        "{{TOKEN}}",
+                        if case == "waiting" {
+                            ""
+                        } else {
+                            "LOCAL-FIXTURE-TOKEN"
+                        },
+                    )
+                };
+                let header = if path == "/redirect" {
+                    "HTTP/1.1 302 Found\r\nLocation: /waiting"
+                } else {
+                    "HTTP/1.1 200 OK"
                 };
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    "{header}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body.len(),
                     body
                 );
@@ -135,6 +160,7 @@ impl Fixture {
         Self {
             url: format!("http://127.0.0.1:{port}"),
             posts,
+            typed,
             stop,
             thread: Some(thread),
         }
@@ -158,7 +184,6 @@ async fn real_browser_fills_verifies_submits_and_reads_confirmed_outcomes() {
     let _driver = Driver {
         child: Command::new(driver_path)
             .arg(format!("--port={port}"))
-            .arg("--allowed-ips=127.0.0.1")
             .arg("--verbose")
             .arg(format!(
                 "--log-path={}",
@@ -188,6 +213,34 @@ async fn real_browser_fills_verifies_submits_and_reads_confirmed_outcomes() {
         notifications: false,
         ..Default::default()
     };
+    for (case, expected_missing) in [
+        ("readonly", false),
+        ("changed", true),
+        ("changed-type", false),
+    ] {
+        let mut browser =
+            BrowserRedeemer::local_fixture(config.clone(), &format!("{}/{case}", fixture.url))
+                .unwrap();
+        let report = browser.inspect().await.unwrap();
+        assert_eq!(!report.missing.is_empty(), expected_missing);
+        assert!(report.verification_present);
+        assert_eq!(!report.changed_types.is_empty(), case == "changed-type");
+        browser.shutdown().await;
+        assert_eq!(fixture.posts.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.typed.load(Ordering::SeqCst), 0);
+    }
+    let mut redirected =
+        BrowserRedeemer::local_fixture(config.clone(), &format!("{}/redirect", fixture.url))
+            .unwrap();
+    assert!(
+        redirected
+            .inspect()
+            .await
+            .unwrap_err()
+            .detail
+            .contains("轉址")
+    );
+    redirected.shutdown().await;
     let credentials = Credentials {
         username: "fixture-user".into(),
         password: zeroize::Zeroizing::new("fixture-password".into()),
@@ -250,4 +303,62 @@ async fn real_browser_fills_verifies_submits_and_reads_confirmed_outcomes() {
         browser.close().await;
         assert_eq!(fixture.posts.load(Ordering::SeqCst), i + 1);
     }
+}
+
+#[tokio::test]
+#[ignore = "requires ChromeDriver; set CHROMEDRIVER"]
+async fn managed_driver_owns_only_its_child_prevents_duplicates_and_recovers_after_exit() {
+    use trserial::driver::{DriverManager, Readiness};
+    let socket = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = socket.local_addr().unwrap().port();
+    drop(socket);
+    let root = tempfile::TempDir::new().unwrap();
+    let mut config = Config {
+        webdriver_url: format!("http://127.0.0.1:{port}"),
+        ..Default::default()
+    };
+    config.driver.managed = true;
+    config.driver.binary = std::env::var("CHROMEDRIVER")
+        .unwrap_or_else(|_| "chromedriver".into())
+        .into();
+    let mut first = DriverManager::new(config.clone(), root.path().into()).unwrap();
+    // Trailing slash must share the same endpoint lock.
+    let mut other_config = config.clone();
+    other_config.webdriver_url.push('/');
+    let mut second = DriverManager::new(other_config, root.path().into()).unwrap();
+    let (a, b) = tokio::join!(first.ensure_ready(), second.ensure_ready());
+    a.unwrap();
+    b.unwrap();
+    assert_ne!(first.owned_pid().is_some(), second.owned_pid().is_some());
+    let (owner, borrower) = if first.owned_pid().is_some() {
+        (&mut first, &mut second)
+    } else {
+        (&mut second, &mut first)
+    };
+    let old_pid = owner.owned_pid().unwrap();
+    let mut external_config = config.clone();
+    external_config.driver.managed = false;
+    let mut external = DriverManager::new(external_config, root.path().into()).unwrap();
+    external.ensure_ready().await.unwrap();
+    external.shutdown().await;
+    assert_eq!(owner.readiness().await, Readiness::Ready);
+    borrower.shutdown().await;
+    assert_eq!(owner.readiness().await, Readiness::Ready);
+    #[cfg(unix)]
+    let status = Command::new("kill")
+        .args(["-9", &old_pid.to_string()])
+        .status()
+        .unwrap();
+    #[cfg(windows)]
+    let status = Command::new("taskkill")
+        .args(["/PID", &old_pid.to_string(), "/F"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    owner.ensure_ready().await.unwrap();
+    assert_ne!(owner.owned_pid(), Some(old_pid));
+    owner.shutdown().await;
+    assert_eq!(owner.readiness().await, Readiness::Missing);
+    assert!(external.ensure_ready().await.is_err());
+    assert!(external.owned_pid().is_none());
 }

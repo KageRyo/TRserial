@@ -85,3 +85,78 @@ fn unrelated_and_malformed_messages_do_not_persist() {
     assert!(!output.status.success());
     assert!(!String::from_utf8_lossy(&output.stderr).contains("not-an-allowed-setting"));
 }
+
+#[test]
+fn smoke_workflow_is_offline_and_test_data_cannot_reach_live_redemption() {
+    let dir = TempDir::new().unwrap();
+    assert!(run(&dir, &["init"]).status.success());
+    assert!(run(&dir, &["smoke-test"]).status.success());
+    let out = run(
+        &dir,
+        &["redeem", "malojam1106", "--account", "smoke", "--dry-run"],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !run(&dir, &["redeem", "malojam1106", "--account", "smoke"])
+            .status
+            .success()
+    );
+    assert!(
+        run(&dir, &["daemon", "--once", "--backfill"])
+            .status
+            .success()
+    );
+    let s = Store::open(&dir.path().join("history.sqlite")).unwrap();
+    assert!(s.jobs().unwrap().is_empty());
+    assert!(s.attempts().unwrap().is_empty());
+    let accounts = Accounts::open(dir.path()).unwrap();
+    accounts
+        .add("real-metadata", "fixture-not-real", "fake", true)
+        .unwrap();
+    assert!(
+        !run(
+            &dir,
+            &["redeem", "malojam1106", "--account", "real-metadata"]
+        )
+        .status
+        .success()
+    );
+}
+#[test]
+fn daemon_mock_ingestion_never_processes_existing_live_pending_jobs() {
+    let dir = TempDir::new().unwrap();
+    assert!(run(&dir, &["init"]).status.success());
+    let a = Accounts::open(dir.path())
+        .unwrap()
+        .add("A", "fixture-user", "fake", true)
+        .unwrap();
+    let mut s = Store::open(&dir.path().join("history.sqlite")).unwrap();
+    let text = "序號: real123";
+    s.ingest("manual", None, text, &trserial::parser::parse(text))
+        .unwrap();
+    s.enqueue("real123", &[a]).unwrap();
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/messages.json");
+    let out = run(
+        &dir,
+        &["daemon", "--mock", path.to_str().unwrap(), "--once"],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(s.jobs().unwrap()[0].status, "pending");
+    assert!(s.attempts().unwrap().is_empty());
+    assert!(
+        !run(
+            &dir,
+            &["daemon", "--mock", path.to_str().unwrap(), "--backfill"]
+        )
+        .status
+        .success()
+    );
+}

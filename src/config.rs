@@ -16,12 +16,29 @@ pub struct Config {
     pub retry_base_seconds: u64,
     pub notifications: bool,
     pub discord: DiscordConfig,
+    pub driver: DriverConfig,
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DiscordConfig {
     pub enabled: bool,
     pub channels: Vec<u64>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DriverConfig {
+    pub managed: bool,
+    pub binary: PathBuf,
+    pub startup_timeout_seconds: u64,
+}
+impl Default for DriverConfig {
+    fn default() -> Self {
+        Self {
+            managed: false,
+            binary: PathBuf::from("chromedriver"),
+            startup_timeout_seconds: 15,
+        }
+    }
 }
 impl Default for Config {
     fn default() -> Self {
@@ -36,6 +53,7 @@ impl Default for Config {
             retry_base_seconds: 10,
             notifications: true,
             discord: DiscordConfig::default(),
+            driver: DriverConfig::default(),
         }
     }
 }
@@ -50,6 +68,15 @@ impl Config {
         } else {
             Self::default()
         };
+        c.validate()?;
+        Ok(c)
+    }
+    pub fn validate(&self) -> Result<()> {
+        let c = self;
+        ensure!(
+            (1..=120).contains(&c.driver.startup_timeout_seconds),
+            "driver.startup_timeout_seconds 必須介於 1 與 120"
+        );
         ensure!(
             (1..=10).contains(&c.max_attempts),
             "max_attempts 必須介於 1 與 10"
@@ -74,7 +101,17 @@ impl Config {
                 && u.password().is_none(),
             "WebDriver 必須使用本機 HTTP 位址"
         );
-        Ok(c)
+        ensure!(
+            u.query().is_none() && u.fragment().is_none() && u.port_or_known_default() != Some(0),
+            "WebDriver 位址不可包含查詢參數或片段，且須使用有效連接埠"
+        );
+        if c.driver.managed {
+            ensure!(
+                u.host_str() == Some("127.0.0.1") && u.path() == "/",
+                "managed 模式請使用 http://127.0.0.1:PORT 根路徑"
+            );
+        }
+        Ok(())
     }
 }
 pub fn default_data_dir() -> Result<PathBuf> {
