@@ -91,10 +91,16 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $gui = Start-Process -FilePath .\target\debug\trserial-desktop.exe -ArgumentList '--data-dir .trserial\ci-gui --smoke-test' -NoNewWindow -PassThru
+          $start = [System.Diagnostics.ProcessStartInfo]::new()
+          $start.FileName = (Resolve-Path .\target\debug\trserial-desktop.exe).Path
+          $start.Arguments = '--data-dir .trserial\ci-gui --smoke-test'
+          $start.UseShellExecute = $false
+          $gui = [System.Diagnostics.Process]::Start($start)
           if (-not $gui.WaitForExit(90000)) {
             $gui.Kill($true)
             throw 'Native desktop smoke test timed out'
           }
-          if ($gui.ExitCode -ne 0) { throw "Native desktop smoke test failed: $($gui.ExitCode)" }
+          $exitCode = $gui.ExitCode
+          $gui.Dispose()
+          if ($exitCode -ne 0) { throw "Native desktop smoke test failed: $exitCode" }
       - run: cargo build --locked --release -p trserial-desktop
