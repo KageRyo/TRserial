@@ -128,6 +128,19 @@ pub(crate) fn set_window_visible(window: &gpui_kit::Window, visible: bool) -> Re
     Ok(())
 }
 
+/// Release builds use the Windows GUI subsystem, so double-clicking opens no
+/// console. When started from a terminal, reuse it for startup errors and logs.
+#[cfg(all(windows, not(debug_assertions)))]
+pub(crate) fn attach_parent_console() {
+    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+    // No preconditions; failure only means the parent has no console.
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+#[cfg(not(all(windows, not(debug_assertions))))]
+pub(crate) fn attach_parent_console() {}
+
 /// A watcher alone is insufficient: the shell must host our registered item.
 #[cfg(target_os = "linux")]
 pub(crate) async fn tray_host_available() -> bool {

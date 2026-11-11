@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod accounts;
 mod app;
 mod backend;
@@ -25,6 +27,7 @@ struct Arguments {
     smoke_test: bool,
 }
 fn main() -> anyhow::Result<()> {
+    platform::attach_parent_console();
     trserial::init_logging();
     let args = Arguments::parse();
     let dir = args
