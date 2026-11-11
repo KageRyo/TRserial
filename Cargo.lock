@@ -8262,6 +8262,7 @@ dependencies = [
  "chrono",
  "clap",
  "directories",
+ "embed-resource",
  "fs2",
  "gpui-kit",
  "gpui-tray",

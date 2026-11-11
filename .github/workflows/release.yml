@@ -6,10 +6,14 @@ on:
         description: Tag for the draft; GitHub creates it only when the owner publishes the release
         required: true
         default: v0.1.0
-  # Validate packaging when this workflow changes; pull requests never create a release.
+  # Validate packaging when release files change; pull requests never create a release.
   pull_request:
     paths:
       - .github/workflows/release.yml
+      - .github/scripts/desktop-smoke.ps1
+      - desktop/installer/**
+      - desktop/build.rs
+      - desktop/src/mark.rs
 permissions:
   contents: read
 concurrency:
@@ -20,11 +24,20 @@ env:
 jobs:
   version:
     runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      core: ${{ steps.version.outputs.core }}
     steps:
       - uses: actions/checkout@v4
-      - name: Tag matches both Cargo package versions
+      - name: Tag is SemVer and matches both Cargo package versions
+        id: version
         shell: bash
         run: |
+          if [[ ! "$TAG" =~ ^v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+            echo "::error::$TAG is not vX.Y.Z or vX.Y.Z-prerelease"
+            exit 1
+          fi
+          core="${BASH_REMATCH[1]}"
           for manifest in Cargo.toml desktop/Cargo.toml; do
             version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$manifest" | head -n 1)
             if [ "v$version" != "$TAG" ]; then
@@ -32,6 +45,8 @@ jobs:
               exit 1
             fi
           done
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "core=$core" >> "$GITHUB_OUTPUT"
 
   build:
     needs: version
@@ -42,18 +57,20 @@ jobs:
           # Ubuntu 24.04 keeps the glibc baseline at the current LTS.
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-            platform: linux-x86_64
+            platform: linux-amd64
             rustflags: ""
           # Static CRT so a clean Windows install does not need the VC++ redistributable.
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            platform: windows-x86_64
+            platform: windows-amd64
             rustflags: -C target-feature=+crt-static
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     env:
       TARGET: ${{ matrix.target }}
-      PACKAGE: trserial-${{ inputs.tag || 'v0.1.0' }}-${{ matrix.platform }}
+      PACKAGE: trserial-${{ matrix.platform }}
+      VERSION: ${{ needs.version.outputs.version }}
+      CORE_VERSION: ${{ needs.version.outputs.core }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -79,77 +96,280 @@ jobs:
         run: |
           timeout 120 xvfb-run -a dbus-run-session -- \
             "target/$TARGET/release/trserial-desktop" --data-dir "$RUNNER_TEMP/release-smoke" --smoke-test
-          "target/$TARGET/release/trserial" --help > /dev/null
+          test "$("target/$TARGET/release/trserial" --version)" = "trserial $VERSION"
       - name: Windows release smoke test
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $start = [System.Diagnostics.ProcessStartInfo]::new()
-          $start.FileName = (Resolve-Path "target\$env:TARGET\release\trserial-desktop.exe").Path
-          $start.Arguments = "--data-dir `"$env:RUNNER_TEMP\release-smoke`" --smoke-test"
-          $start.UseShellExecute = $false
-          $gui = [System.Diagnostics.Process]::Start($start)
-          if (-not $gui.WaitForExit(120000)) {
-            $gui.Kill($true)
-            throw 'Release desktop smoke test timed out'
-          }
-          $exitCode = $gui.ExitCode
-          $gui.Dispose()
-          if ($exitCode -ne 0) { throw "Release desktop smoke test failed: $exitCode" }
-          & "target\$env:TARGET\release\trserial.exe" --help > $null
-          if ($LASTEXITCODE -ne 0) { throw "CLI failed to start: $LASTEXITCODE" }
+          ./.github/scripts/desktop-smoke.ps1 -Exe "target\$env:TARGET\release\trserial-desktop.exe" -DataDir "$env:RUNNER_TEMP\release-smoke"
+          $cli = & "target\$env:TARGET\release\trserial.exe" --version
+          if ($LASTEXITCODE -ne 0 -or $cli -ne "trserial $env:VERSION") { throw "CLI reports '$cli'" }
       - name: Package Linux archive
         if: runner.os == 'Linux'
         run: |
-          mkdir -p "dist/$PACKAGE"
+          mkdir -p "dist/$PACKAGE" release
           cp "target/$TARGET/release/trserial" "target/$TARGET/release/trserial-desktop" \
             README.md LICENSE config.example.toml "dist/$PACKAGE/"
-          tar -C dist -czf "$PACKAGE.tar.gz" "$PACKAGE"
-          echo "ARCHIVE=$PACKAGE.tar.gz" >> "$GITHUB_ENV"
-      - name: Package Windows archive
+          tar -C dist -czf "release/$PACKAGE.tar.gz" "$PACKAGE"
+      - name: Package Windows installer, archive and portable executable
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $dir = New-Item -ItemType Directory -Path "dist\$env:PACKAGE"
-          Copy-Item "target\$env:TARGET\release\trserial.exe", "target\$env:TARGET\release\trserial-desktop.exe", README.md, LICENSE, config.example.toml -Destination $dir
-          Compress-Archive -Path $dir -DestinationPath "$env:PACKAGE.zip"
-          "ARCHIVE=$env:PACKAGE.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $staging = New-Item -ItemType Directory -Path "dist\$env:PACKAGE"
+          $release = New-Item -ItemType Directory -Path release
+          Copy-Item "target\$env:TARGET\release\trserial.exe", "target\$env:TARGET\release\trserial-desktop.exe", README.md, LICENSE, config.example.toml -Destination $staging
+          # The installer shows LICENSE.txt as its license page; the zip keeps LICENSE only.
+          Copy-Item LICENSE "$staging\LICENSE.txt"
+          $iscc = (Get-Command iscc.exe -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) {
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "Inno Setup install failed: $LASTEXITCODE" }
+            $iscc = (Get-ChildItem "${env:ProgramFiles(x86)}", $env:ProgramFiles -Filter ISCC.exe -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+          }
+          if (-not $iscc) { throw 'ISCC.exe not found' }
+          # build.rs writes the icon it embeds; reuse it for the setup program.
+          $icon = Get-ChildItem "target\$env:TARGET\release\build" -Filter trserial.ico -Recurse | Select-Object -First 1
+          if (-not $icon) { throw 'Generated icon not found' }
+          & $iscc "/DAppVersion=$env:VERSION" "/DAppBinaryVersion=$env:CORE_VERSION" "/DSourceDir=$($staging.FullName)" `
+            "/DIconFile=$($icon.FullName)" "/DOutputName=$env:PACKAGE-setup" "/O$($release.FullName)" desktop\installer\trserial.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed: $LASTEXITCODE" }
+          Remove-Item -LiteralPath "$staging\LICENSE.txt"
+          Compress-Archive -Path $staging -DestinationPath "release\$env:PACKAGE.zip"
+          Copy-Item "$staging\trserial-desktop.exe" "release\$env:PACKAGE-portable.exe"
+          # No signing certificate is configured. Confirm that, so the metadata never claims otherwise.
+          foreach ($file in "release\$env:PACKAGE-setup.exe", "release\$env:PACKAGE-portable.exe", "$staging\trserial.exe") {
+            $status = (Get-AuthenticodeSignature -LiteralPath $file).Status
+            if ($status -ne 'NotSigned') { throw "Expected $file to be unsigned, got $status" }
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ env.PACKAGE }}
-          path: ${{ env.ARCHIVE }}
+          path: release/
           if-no-files-found: error
 
-  draft:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+  prepare:
     needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums and release metadata
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum trserial-windows-amd64-setup.exe trserial-windows-amd64-portable.exe \
+            trserial-windows-amd64.zip trserial-linux-amd64.tar.gz > SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
+          jq -n --arg tag "$TAG" --arg commit "$GITHUB_SHA" --arg repository "$GITHUB_REPOSITORY" '{
+            schema_version: 1,
+            tag_name: $tag,
+            target_commitish: $commit,
+            repository: $repository,
+            windows_authenticode: "unsigned",
+            provenance: {
+              provider: "GitHub Artifact Attestations",
+              predicate_type: "https://slsa.dev/provenance/v1",
+              verification: ("gh attestation verify <artifact> --repo " + $repository)
+            }
+          }' > RELEASE-METADATA.json
+          cat SHA256SUMS RELEASE-METADATA.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: dist/
+          if-no-files-found: error
+
+  smoke-windows:
+    needs: [version, prepare]
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist
+      - name: Verify, run, install and uninstall the Windows packages
+        shell: pwsh
+        run: |
+          $dist = (Resolve-Path dist).Path
+          foreach ($line in Get-Content "$dist\SHA256SUMS") {
+            if ($line -notmatch '^(?<hash>[0-9a-f]{64}) [ *](?<name>.+)$') { throw "Invalid SHA256SUMS line: $line" }
+            $name, $hash = $Matches.name, $Matches.hash
+            if ((Get-FileHash -Algorithm SHA256 -LiteralPath "$dist\$name").Hash.ToLowerInvariant() -ne $hash) { throw "Checksum mismatch: $name" }
+          }
+          $metadata = Get-Content "$dist\RELEASE-METADATA.json" -Raw | ConvertFrom-Json
+          if ($metadata.tag_name -ne $env:TAG -or $metadata.windows_authenticode -ne 'unsigned') { throw 'Release metadata does not match this build' }
+          $expected = "trserial $env:VERSION"
+
+          # Portable zip and single executable.
+          $portable = Join-Path $env:RUNNER_TEMP 'portable'
+          Expand-Archive -LiteralPath "$dist\trserial-windows-amd64.zip" -DestinationPath $portable
+          $cli = & "$portable\trserial-windows-amd64\trserial.exe" --version
+          if ($LASTEXITCODE -ne 0 -or $cli -ne $expected) { throw "Zip CLI reports '$cli'" }
+          ./.github/scripts/desktop-smoke.ps1 -Exe "$dist\trserial-windows-amd64-portable.exe" -DataDir "$env:RUNNER_TEMP\portable-smoke"
+
+          # Install for this user, run the installed copy, then uninstall it.
+          $app = Join-Path $env:RUNNER_TEMP 'trserial-install'
+          $install = Start-Process "$dist\trserial-windows-amd64-setup.exe" -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LANG=english /DIR=`"$app`"" -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "Installer exited with $($install.ExitCode)" }
+          $cli = & "$app\trserial.exe" --version
+          if ($LASTEXITCODE -ne 0 -or $cli -ne $expected) { throw "Installed CLI reports '$cli'" }
+          $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'TRserial.lnk'
+          if (-not (Test-Path -LiteralPath $shortcut)) { throw "Start menu shortcut missing: $shortcut" }
+          ./.github/scripts/desktop-smoke.ps1 -Exe "$app\trserial-desktop.exe" -DataDir "$env:RUNNER_TEMP\installed-smoke"
+          $uninstaller = Get-ChildItem -LiteralPath $app -Filter 'unins*.exe' | Select-Object -First 1
+          if (-not $uninstaller) { throw 'The installer did not create an uninstaller' }
+          $remove = Start-Process $uninstaller.FullName -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' -Wait -PassThru
+          if ($remove.ExitCode -ne 0) { throw "Uninstaller exited with $($remove.ExitCode)" }
+          # The uninstaller finishes from a temporary copy, so wait for the files to go.
+          $deadline = (Get-Date).AddSeconds(60)
+          while ((Test-Path -LiteralPath "$app\trserial-desktop.exe") -or (Test-Path -LiteralPath $shortcut)) {
+            if ((Get-Date) -gt $deadline) { throw 'Uninstall left the program or its shortcut behind' }
+            Start-Sleep -Seconds 1
+          }
+          Write-Host 'Windows packages verified; the installer installed, ran and uninstalled cleanly'
+
+  smoke-linux:
+    needs: [version, prepare]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist
+      - name: Runtime libraries listed for users
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvulkan1 mesa-vulkan-drivers libxkbcommon-x11-0 fonts-noto-cjk xvfb xauth dbus-x11
+      - name: Verify and run the Linux package
+        env:
+          WGPU_BACKEND: vulkan
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum --check --strict SHA256SUMS)
+          jq -e --arg tag "$TAG" '.schema_version == 1 and .tag_name == $tag and .windows_authenticode == "unsigned"' dist/RELEASE-METADATA.json
+          dir="$(mktemp -d)"
+          tar -xzf dist/trserial-linux-amd64.tar.gz -C "$dir"
+          package="$dir/trserial-linux-amd64"
+          for file in trserial trserial-desktop README.md LICENSE config.example.toml; do
+            test -f "$package/$file"
+          done
+          test "$("$package/trserial" --version)" = "trserial $VERSION"
+          timeout 120 xvfb-run -a dbus-run-session -- "$package/trserial-desktop" --data-dir "$dir/smoke" --smoke-test
+
+  attest:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    needs: prepare
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist
+      - name: Attest release packages
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-checksums: dist/SHA256SUMS
+      - name: Attest release verification files
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            dist/SHA256SUMS
+            dist/RELEASE-METADATA.json
+
+  verify-provenance:
+    needs: attest
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist
+      - name: Verify every attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for file in dist/*; do
+            gh attestation verify "$file" --repo "$GITHUB_REPOSITORY"
+          done
+
+  draft:
+    needs: [smoke-windows, smoke-linux, verify-provenance]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
+          name: release-assets
           path: dist
-          merge-multiple: true
+      - name: Release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat > notes.md <<'EOF'
+          ## 下載
+
+          - Windows 安裝版：`trserial-windows-amd64-setup.exe`，安裝在目前使用者底下，不需要系統管理員權限
+          - Windows 免安裝：`trserial-windows-amd64-portable.exe` 只有桌面版；`trserial-windows-amd64.zip` 另含 CLI 與說明文件
+          - Linux：`trserial-linux-amd64.tar.gz`，需要 Ubuntu 24.04 以上與 README 列出的桌面函式庫
+          - `SHA256SUMS`：所有下載檔的 SHA-256 檢查碼
+
+          ## 建置驗證
+
+          - Windows Authenticode 簽章：**未簽章**，第一次開啟可能出現 SmartScreen 提示
+          - 打包檔、`SHA256SUMS` 與 `RELEASE-METADATA.json` 都有 GitHub Artifact Attestations
+          - 驗證下載的檔案：`gh attestation verify <檔案> --repo __REPOSITORY__`
+
+          EOF
+          sed -i "s#__REPOSITORY__#$GITHUB_REPOSITORY#" notes.md
+          gh api --method POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+            -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" --jq .body >> notes.md
       - name: Create or refresh the draft release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          cd dist
-          sha256sum trserial-* > SHA256SUMS.txt
-          cat SHA256SUMS.txt
+          set -euo pipefail
+          files=(dist/trserial-windows-amd64-setup.exe dist/trserial-windows-amd64-portable.exe dist/trserial-windows-amd64.zip
+            dist/trserial-linux-amd64.tar.gz dist/SHA256SUMS dist/RELEASE-METADATA.json)
+          # Point the draft at this build so publishing tags the commit the files came from.
+          args=(--draft --target "$GITHUB_SHA" --title "TRserial $TAG" --notes-file notes.md)
+          if [[ "$TAG" == *-* ]]; then args+=(--prerelease); fi
           if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
             if [ "$draft" != "true" ]; then
-              echo "::error::$TAG is already published; refusing to replace its files"
+              echo "::error::$TAG is already published; refusing to change it"
               exit 1
             fi
-            gh release upload "$TAG" trserial-* SHA256SUMS.txt --clobber
+            gh release edit "$TAG" "${args[@]}"
+            # Remove files from earlier runs that this build no longer produces.
+            keep=" ${files[*]##*/} "
+            gh release view "$TAG" --json assets --jq '.assets[].name' | while read -r name; do
+              if [[ "$keep" != *" $name "* ]]; then gh release delete-asset "$TAG" "$name" --yes; fi
+            done
+            gh release upload "$TAG" "${files[@]}" --clobber
           else
             if gh api "repos/$GH_REPO/git/ref/tags/$TAG" > /dev/null 2>&1; then
               echo "::error::Tag $TAG already exists without a draft release"
               exit 1
             fi
-            gh release create "$TAG" trserial-* SHA256SUMS.txt --draft --target "$GITHUB_SHA" \
-              --title "TRserial $TAG" --notes "Draft build of $GITHUB_SHA. Release notes pending."
+            gh release create "$TAG" "${files[@]}" "${args[@]}"
           fi
+          gh release view "$TAG" --json url,isDraft,isPrerelease,tagName

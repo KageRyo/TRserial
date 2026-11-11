@@ -392,6 +392,6 @@ export CHROMEDRIVER=/absolute/path/to/chromedriver
 cargo test --locked --test browser_flow -- --ignored
 ```
 
-[GitHub Actions](https://github.com/KageRyo/TRserial/actions) 分別在 Ubuntu 與 Windows 驗證 CLI 與桌面版，包含 Clippy、單元／介面測試、原生視窗 smoke test 及最佳化編譯。Linux 另以獨立 D-Bus fixture 測試實際系統匣的隱藏、還原與結束。`cargo build --release` 只做本機編譯，CI 不發布執行檔。
+[GitHub Actions](https://github.com/KageRyo/TRserial/actions) 分別在 Ubuntu 與 Windows 驗證 CLI 與桌面版，包含 Clippy、單元／介面測試、原生視窗 smoke test 及最佳化編譯。Linux 另以獨立 D-Bus fixture 測試實際系統匣的隱藏、還原與結束。`cargo build --release` 只做本機編譯。一般 CI 不產生發布檔；draft release 由手動觸發的 workflow 建立，只會產生 draft，流程見 [發布說明](docs/releasing.md)。
 
 `desktop/` 負責 GPUI Kit 頁面與系統匣，透過背景執行緒的命令／快照更新 UI。`src/service.rs` 共用帳號、匯入、確認範圍、設定與瀏覽器工作生命週期；SQL 與兌換規則留在 core。Workspace 預設只建置 CLI，不要求 GUI 的系統函式庫。
