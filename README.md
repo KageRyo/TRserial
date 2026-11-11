@@ -83,6 +83,8 @@ cargo run --locked -p trserial-desktop -- --data-dir .trserial/gui-smoke-linux -
 
 「設定」可儲存明暗外觀、通知、開啟時自動處理與登入啟動。登入啟動僅寫入目前使用者的 Windows Run 登錄值或 Linux `~/.config/autostart/trserial.desktop`。桌面會顯示執行狀態、目前序號／帳號與驗證等待；新確認序號與兌換結果使用既有桌面通知。
 
+**自動更新**：預設在開啟時向 GitHub 取得公開的版本清單，只傳送版本查詢，不傳送帳號或使用資料；可在「設定」關閉，或按「立即檢查更新」。有新版本時主畫面會出現提示。Windows 安裝版會下載安裝程式並核對 `SHA256SUMS` 的檢查碼，通過後開啟安裝程式並結束 TRserial；Linux 會核對後替換程式檔並重新啟動；Windows 免安裝版會開啟下載頁。自動處理或兌換進行中時不能安裝更新。
+
 桌面版的 Discord 監聽顯示「未設定」，目前未提供 Token 設定介面；既有頻道 ID 僅供查看。需要 Discord 時使用下方選用 CLI 功能，Token 仍由環境變數提供。
 
 ## 安裝 CLI

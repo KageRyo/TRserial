@@ -1,6 +1,6 @@
 use crate::{
     accounts::AccountsPage,
-    backend::{Backend, Command, RunState},
+    backend::{Backend, Command, RunState, UpdateState},
     codes::CodesPage,
     dashboard::Dashboard,
     history::HistoryPage,
@@ -9,6 +9,7 @@ use crate::{
         self, Controller, HideWindow, Page, QuitApp, ShowAccounts, ShowCodes, ShowDashboard,
         ShowHistory, ShowSettings, ShowWindow, StopProcessing, ToggleProcessing,
     },
+    update,
 };
 use gpui_kit::component::{
     ActiveTheme, Disableable, Sizable, StyledExt, Theme, ThemeMode,
@@ -186,6 +187,9 @@ impl Render for Shell {
                     ),
             );
         }
+        if let Some(bar) = update_bar(&p, &self.controller, cx) {
+            workspace = workspace.child(bar);
+        }
         workspace = workspace.child(div().flex_1().min_h_0().min_w_0().child(content));
         h_flex()
             .items_stretch()
@@ -194,6 +198,80 @@ impl Render for Shell {
             .text_color(cx.theme().foreground)
             .child(sidebar)
             .child(workspace)
+    }
+}
+
+fn megabytes(bytes: u64) -> String {
+    format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+}
+
+/// Offers a newer release: install it when this copy can update itself and the
+/// release carries the file and checksum, otherwise open the release page.
+fn update_bar(
+    p: &crate::backend::Presentation,
+    controller: &Entity<Controller>,
+    cx: &App,
+) -> Option<gpui_kit::Div> {
+    let row = |text: String| {
+        h_flex().gap_2().child(
+            div()
+                .flex_1()
+                .text_sm()
+                .text_color(cx.theme().primary)
+                .child(text),
+        )
+    };
+    match &p.update {
+        UpdateState::Available(release) => {
+            let text = format!("有新版本 {}（目前 {}）", release.version, update::current());
+            let automatic = p.update_method != update::Method::Manual
+                && release.asset.is_some()
+                && release.checksums.is_some();
+            let button = if automatic {
+                let controller = controller.clone();
+                let version = release.version.clone();
+                let body = if p.update_method == update::Method::Installer {
+                    "下載後會核對 SHA-256，再開啟安裝程式。TRserial 會先結束，安裝完成後請從開始選單開啟。"
+                } else {
+                    "下載後會核對 SHA-256，替換程式檔並重新啟動 TRserial。"
+                };
+                Button::new("update-install")
+                    .small()
+                    .primary()
+                    .label("安裝更新")
+                    .disabled(p.busy || p.state.is_busy())
+                    .on_click(move |_, window, cx| {
+                        let controller = controller.clone();
+                        ui::confirm(
+                            window,
+                            cx,
+                            format!("安裝 TRserial {version}？"),
+                            body,
+                            "下載並安裝",
+                            move |cx| ui::send(&controller, Command::InstallUpdate, cx),
+                        );
+                    })
+            } else {
+                let page = release.page.clone();
+                Button::new("update-open")
+                    .small()
+                    .label("前往下載")
+                    .on_click(move |_, _, cx| cx.open_url(&page))
+            };
+            Some(row(text).child(button))
+        }
+        UpdateState::Downloading {
+            release,
+            written,
+            total,
+        } => Some(row(format!(
+            "正在下載 {}：{}／{}",
+            release.version,
+            megabytes(*written),
+            megabytes(*total)
+        ))),
+        UpdateState::Ready { .. } => Some(row("更新已就緒，正在結束 TRserial…".into())),
+        UpdateState::Idle | UpdateState::Checking => None,
     }
 }
 
@@ -375,6 +453,11 @@ fn synchronize(snapshot: &crate::backend::Presentation, cx: &mut App) -> bool {
         && !cx.global::<DesktopApp>().quitting
     {
         show(cx);
+    }
+    if matches!(snapshot.update, UpdateState::Ready { .. }) && !cx.global::<DesktopApp>().quitting {
+        // The installer is running or the files were replaced; exit so it can
+        // finish, and main() starts the new Linux version afterwards.
+        quit(cx);
     }
     if snapshot.closed && cx.global::<DesktopApp>().quitting {
         if let Some(tray) = cx.global::<DesktopApp>().tray.clone() {
@@ -759,5 +842,48 @@ mod click_tests {
         })
         .unwrap();
         assert_eq!(*seen.borrow(), ["codes", "toggle"]);
+    }
+
+    /// Automatic install needs a self-updating copy plus the platform file and
+    /// SHA256SUMS; anything else may only open the release page.
+    #[gpui_kit::test]
+    fn update_bar_installs_only_verifiable_releases(cx: &mut TestAppContext) {
+        use crate::{backend::UpdateState, update};
+        let fixture = Fixture::new();
+        let (window, controller, _) = fixture.open(cx, |controller, window, cx| {
+            cx.new(|cx| Shell::new(controller, window, cx))
+        });
+        let release = |checksums: bool| update::Release {
+            version: semver::Version::new(9, 0, 0),
+            page: "https://github.com/KageRyo/TRserial/releases/tag/v9.0.0".into(),
+            asset: Some(update::Asset {
+                name: "trserial-windows-amd64-setup.exe".into(),
+                url: "https://github.com/KageRyo/TRserial/releases/download/v9.0.0/x".into(),
+                size: 1,
+            }),
+            checksums: checksums.then(|| "https://github.com/KageRyo/TRserial/x".into()),
+        };
+        for (method, checksums, install) in [
+            (update::Method::Installer, true, true),
+            (update::Method::Installer, false, false),
+            (update::Method::Manual, true, false),
+        ] {
+            cx.update(|cx| {
+                controller.update(cx, |c, cx| {
+                    c.presentation.update = UpdateState::Available(release(checksums));
+                    c.presentation.update_method = method;
+                    cx.notify();
+                })
+            });
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                assert_eq!(
+                    window.find_all("update-install").len(),
+                    usize::from(install)
+                );
+                assert_eq!(window.find_all("update-open").len(), usize::from(!install));
+            })
+            .unwrap();
+        }
     }
 }

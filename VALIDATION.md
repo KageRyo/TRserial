@@ -85,6 +85,7 @@ GUI 分支從已合併的 PR #1（`bee7492`）開始。使用 GPUI Kit `0.9.0`�
 - Linux 原生程序：獨立 D-Bus fixture 接收真正的 StatusNotifierItem 註冊，呼叫 Activate 還原視窗，檢查隱藏時背景仍在執行、結束後鎖可取得及嘗試紀錄為零。另測試沒有可用 host 時保留主視窗。
 - GUI `--smoke-test`：全新資料目錄、測試帳號、mock 訊息、五頁實際繪製、導覽不增加視窗、啟動／暫停／停止與正常結束。未完成測試時回傳失敗。
 - Draft release workflow：編譯結果先跑 smoke test；打包後在全新的 runner 核對檢查碼與 metadata，執行 CLI `--version` 與桌面 smoke test。Windows 安裝程式會以目前使用者靜默安裝、確認開始選單捷徑、執行已安裝的程式，再解除安裝並確認程式與捷徑已移除。所有發布檔都有 attestation，建立 draft 前逐一驗證。流程見 [docs/releasing.md](docs/releasing.md)。
+- 自動更新：版本挑選會略過 draft、非 SemVer tag 與預覽版；下載網址只接受 GitHub HTTPS；`SHA256SUMS` 缺少、格式錯誤或衝突時拒絕；下載檔大小或雜湊不符時捨棄；Linux 壓縮檔只取出兩個執行檔，拒絕不安全路徑並保留原檔；主畫面只在可驗證時提供自動安裝。另以實際 GitHub API 確認目前沒有已發布的新版。
 
 GUI CI 在 Ubuntu 與 Windows 分別執行嚴格 Clippy、一般測試、原生程序 smoke test 與最佳化編譯。CLI 的 Windows／Linux 測試與本機假網站瀏覽器整合測試保留。一般 CLI 建置不需 GUI 系統函式庫。
 
@@ -106,6 +107,7 @@ GUI CI 在 Ubuntu 與 Windows 分別執行嚴格 Clippy、一般測試、原生�
 | --- | --- |
 | Windows 10／11 桌面 | Credential Manager 新增／更新／移除、Toast、系統匣點擊與選單、登入啟動、顯示縮放 |
 | Windows 安裝程式 | SmartScreen 提示、MIT 授權頁、英文與正體中文介面、捷徑圖示、覆蓋安裝新版、解除安裝後保留帳號與兌換紀錄 |
+| 自動更新 | 下一個版本發布後：Windows 安裝版與 Linux 從舊版更新並重新開啟、免安裝版開啟下載頁、關閉自動檢查後開啟時不連線 |
 | Ubuntu 桌面 | 已解鎖的 Secret Service、通知、GNOME／KDE 系統匣、登入啟動與 Wayland |
 | 官方網站 | 單一真實帳號與有效序號、人工 Cloudflare 驗證、網站回應與遊戲內結果 |
 

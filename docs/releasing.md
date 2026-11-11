@@ -49,6 +49,12 @@ gh attestation verify trserial-windows-amd64-setup.exe --repo KageRyo/TRserial
 
 `AppId` 不能更改，Windows 靠它辨識同一個程式來覆蓋安裝與解除安裝。
 
+## 自動更新
+
+桌面版用 GitHub Releases API 找比目前版本新的已發布版本，略過 draft；目前不是預覽版時也略過 pre-release。Windows 安裝版下載 `trserial-windows-amd64-setup.exe`，Linux 下載 `trserial-linux-amd64.tar.gz`，兩者都必須在 `SHA256SUMS` 找到相符的檢查碼才會安裝，下載網址也只接受 GitHub 的 HTTPS 網域。
+
+所以這兩個檔名與 `SHA256SUMS` 不能改名或缺少。缺少時桌面版只會引導使用者到下載頁，不會自動安裝。Windows 免安裝版一律開啟下載頁，因為安裝程式會裝到另一個位置。
+
 ## 程式碼簽章
 
 目前沒有 Authenticode 憑證，Windows 檔案都未簽章。workflow 會用 `Get-AuthenticodeSignature` 確認，`RELEASE-METADATA.json` 和 release 說明也會標示未簽章，使用者第一次開啟時可能看到 SmartScreen。
@@ -67,3 +73,4 @@ gh attestation verify trserial-windows-amd64-setup.exe --repo KageRyo/TRserial
 - Linux 壓縮檔在依 README 安裝函式庫後能開啟
 - `VALIDATION.md` 的「桌面實機驗收」已完成，未完成的項目寫進 release 說明
 - release 說明標示未簽章
+- 從上一個已發布版本自動更新到這一版：Windows 安裝版與 Linux 都能完成並重新開啟；第一個版本之前沒有可更新的舊版，從下一版開始檢查

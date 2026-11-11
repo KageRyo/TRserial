@@ -12,6 +12,7 @@ mod settings;
 #[cfg(test)]
 mod testing;
 mod ui;
+mod update;
 
 use clap::Parser;
 use std::path::PathBuf;
@@ -35,8 +36,18 @@ fn main() -> anyhow::Result<()> {
         .data_dir
         .unwrap_or(trserial::config::default_data_dir()?);
     let config = args.config.unwrap_or_else(|| dir.join("config.toml"));
+    // Resolve before a Linux update replaces the file and the path goes stale.
+    let executable = std::env::current_exe().and_then(std::fs::canonicalize);
     let backend = backend::Backend::start(dir, config, args.smoke_test);
     app::run(backend.clone(), args.smoke_test);
+    if let backend::UpdateState::Ready { relaunch: true } = backend.snapshot().update {
+        // The window closes only after the backend released the data-directory
+        // lock, so the new version can take it over with the same arguments.
+        std::process::Command::new(executable?)
+            .args(std::env::args_os().skip(1))
+            .spawn()
+            .map_err(|error| anyhow::anyhow!("無法啟動新版 TRserial：{error}"))?;
+    }
     if args.smoke_test {
         let result = backend.snapshot();
         if let Some(error) = result.error {
