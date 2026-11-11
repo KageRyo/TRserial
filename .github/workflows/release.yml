@@ -1,0 +1,155 @@
+name: Draft release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag for the draft; GitHub creates it only when the owner publishes the release
+        required: true
+        default: v0.1.0
+  # Validate packaging when this workflow changes; pull requests never create a release.
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+permissions:
+  contents: read
+concurrency:
+  group: draft-release-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  TAG: ${{ inputs.tag || 'v0.1.0' }}
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches both Cargo package versions
+        shell: bash
+        run: |
+          for manifest in Cargo.toml desktop/Cargo.toml; do
+            version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$manifest" | head -n 1)
+            if [ "v$version" != "$TAG" ]; then
+              echo "::error file=$manifest::$manifest declares $version but the tag is $TAG"
+              exit 1
+            fi
+          done
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu 24.04 keeps the glibc baseline at the current LTS.
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x86_64
+            rustflags: ""
+          # Static CRT so a clean Windows install does not need the VC++ redistributable.
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: windows-x86_64
+            rustflags: -C target-feature=+crt-static
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      TARGET: ${{ matrix.target }}
+      PACKAGE: trserial-${{ inputs.tag || 'v0.1.0' }}-${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - name: Linux desktop libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig-dev libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev libvulkan1 mesa-vulkan-drivers xvfb xauth dbus-x11 fonts-noto-cjk
+      - name: Build CLI and desktop
+        shell: bash
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: |
+          cargo build --locked --release --target "$TARGET"
+          cargo build --locked --release --target "$TARGET" -p trserial-desktop
+      - name: Linux release smoke test
+        if: runner.os == 'Linux'
+        env:
+          WGPU_BACKEND: vulkan
+        run: |
+          timeout 120 xvfb-run -a dbus-run-session -- \
+            "target/$TARGET/release/trserial-desktop" --data-dir "$RUNNER_TEMP/release-smoke" --smoke-test
+          "target/$TARGET/release/trserial" --help > /dev/null
+      - name: Windows release smoke test
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $start = [System.Diagnostics.ProcessStartInfo]::new()
+          $start.FileName = (Resolve-Path "target\$env:TARGET\release\trserial-desktop.exe").Path
+          $start.Arguments = "--data-dir `"$env:RUNNER_TEMP\release-smoke`" --smoke-test"
+          $start.UseShellExecute = $false
+          $gui = [System.Diagnostics.Process]::Start($start)
+          if (-not $gui.WaitForExit(120000)) {
+            $gui.Kill($true)
+            throw 'Release desktop smoke test timed out'
+          }
+          $exitCode = $gui.ExitCode
+          $gui.Dispose()
+          if ($exitCode -ne 0) { throw "Release desktop smoke test failed: $exitCode" }
+          & "target\$env:TARGET\release\trserial.exe" --help > $null
+          if ($LASTEXITCODE -ne 0) { throw "CLI failed to start: $LASTEXITCODE" }
+      - name: Package Linux archive
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p "dist/$PACKAGE"
+          cp "target/$TARGET/release/trserial" "target/$TARGET/release/trserial-desktop" \
+            README.md LICENSE config.example.toml "dist/$PACKAGE/"
+          tar -C dist -czf "$PACKAGE.tar.gz" "$PACKAGE"
+          echo "ARCHIVE=$PACKAGE.tar.gz" >> "$GITHUB_ENV"
+      - name: Package Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = New-Item -ItemType Directory -Path "dist\$env:PACKAGE"
+          Copy-Item "target\$env:TARGET\release\trserial.exe", "target\$env:TARGET\release\trserial-desktop.exe", README.md, LICENSE, config.example.toml -Destination $dir
+          Compress-Archive -Path $dir -DestinationPath "$env:PACKAGE.zip"
+          "ARCHIVE=$env:PACKAGE.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE }}
+          path: ${{ env.ARCHIVE }}
+          if-no-files-found: error
+
+  draft:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create or refresh the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cd dist
+          sha256sum trserial-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$draft" != "true" ]; then
+              echo "::error::$TAG is already published; refusing to replace its files"
+              exit 1
+            fi
+            gh release upload "$TAG" trserial-* SHA256SUMS.txt --clobber
+          else
+            if gh api "repos/$GH_REPO/git/ref/tags/$TAG" > /dev/null 2>&1; then
+              echo "::error::Tag $TAG already exists without a draft release"
+              exit 1
+            fi
+            gh release create "$TAG" trserial-* SHA256SUMS.txt --draft --target "$GITHUB_SHA" \
+              --title "TRserial $TAG" --notes "Draft build of $GITHUB_SHA. Release notes pending."
+          fi
