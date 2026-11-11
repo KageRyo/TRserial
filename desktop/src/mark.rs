@@ -85,8 +85,8 @@ fn bitmap(size: u32) -> Vec<u8> {
     out.extend_from_slice(&32u16.to_le_bytes());
     out.extend_from_slice(&[0; 24]);
     for row in rgba.chunks_exact(size as usize * 4).rev() {
-        for p in row.chunks_exact(4) {
-            out.extend_from_slice(&[p[2], p[1], p[0], p[3]]);
+        for &[r, g, b, a] in row.as_chunks::<4>().0 {
+            out.extend_from_slice(&[b, g, r, a]);
         }
     }
     let mask_row = size.div_ceil(32) * 4;
