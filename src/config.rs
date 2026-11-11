@@ -18,7 +18,7 @@ pub struct Config {
     pub discord: DiscordConfig,
     pub driver: DriverConfig,
 }
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DiscordConfig {
     pub enabled: bool,

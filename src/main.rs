@@ -411,7 +411,12 @@ async fn main() -> Result<()> {
             };
             let cancel = cancellation();
             #[cfg(feature = "discord")]
-            let discord = trserial::discord::start(&config.discord, &dir, cancel.clone()).await?;
+            let discord = if config.discord.enabled {
+                let token = trserial::discord::resolve_token(&accounts)?;
+                trserial::discord::start(&config.discord, &dir, token, None, cancel.clone()).await?
+            } else {
+                None
+            };
             let mut session = RedemptionSession::new(config.clone());
             println!("背景處理已啟動；Ctrl+C 結束。歷史補抓：{}", backfill);
 

@@ -45,7 +45,7 @@ release 執行檔另測過互動新增假帳號、匯入 `examples/messages.json
 | Windows 桌面 | Credential Manager、Toast 通知、工作排程器 |
 | Linux 桌面 | 已解鎖的 Secret Service、通知顯示 |
 | 正式網站 | 真實帳號兌換、人工驗證、回應文字與遊戲內入帳 |
-| Discord Bot | 頻道權限、新訊息、斷線恢復與歷史分頁 |
+| Discord Bot | 桌面版設定 Token 與頻道後連線、頻道權限、新訊息、斷線恢復與歷史分頁、Token 無效與未開 Message Content Intent 的提示 |
 | 剪貼簿 | Windows／Linux 桌面監看 |
 | 自動啟動 | systemd 使用者服務與 Windows 登入排程 |
 
@@ -111,4 +111,4 @@ GUI CI 在 Ubuntu 與 Windows 分別執行嚴格 Clippy、一般測試、原生�
 | Ubuntu 桌面 | 已解鎖的 Secret Service、通知、GNOME／KDE 系統匣、登入啟動與 Wayland |
 | 官方網站 | 單一真實帳號與有效序號、人工 Cloudflare 驗證、網站回應與遊戲內結果 |
 
-開發與自動測試只使用假帳號及本機假網站，沒有執行正式兌換。桌面 Discord 監聽顯示未設定，Token 與頻道編輯介面尚未提供；選用 CLI 整合保留。Linux 收起視窗後會重新建立頁面，未儲存的表單內容不保留；Windows 原生隱藏會保留頁面。表格採虛擬化顯示，目前快照會讀取完整歷史，尚未驗證大量長期紀錄的效能。
+開發與自動測試只使用假帳號及本機假網站，沒有執行正式兌換。桌面版可在設定頁啟用 Discord、編輯頻道並把 Bot Token 存入系統憑證庫；自動測試以記憶體憑證庫確認 Token 不寫入資料檔、各資料目錄分開、憑證庫無法使用時不改存明文，實際 Bot 連線仍待驗收。Linux 收起視窗後會重新建立頁面，未儲存的表單內容不保留；Windows 原生隱藏會保留頁面。表格採虛擬化顯示，目前快照會讀取完整歷史，尚未驗證大量長期紀錄的效能。

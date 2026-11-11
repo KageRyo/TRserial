@@ -13,7 +13,7 @@ TRserial 是「跑Online」（TalesRunner）的多帳號序號兌換工具，使
 - 使用 Chrome／Chromium 與 WebDriver 填寫官方兌換表單。遇到驗證時等待使用者在瀏覽器操作，通過後繼續。
 - 以 SQLite 記錄每個帳號／序號的工作、嘗試次數、結果、錯誤類別與時間。只有送出前的暫時錯誤會自動重試。
 - 提供成功、人工驗證、失敗或結果不明，以及整批處理摘要的桌面通知。
-- 用 `daemon` 接續佇列。剪貼簿監看與 Discord Bot 需額外編譯並明確啟用。
+- 用 `daemon` 接續佇列。桌面版內建 Discord Bot 監聽，在設定頁啟用；CLI 的剪貼簿監看與 Discord Bot 需額外編譯並明確啟用。
 
 測試結果與待驗收項目見 [驗證紀錄](VALIDATION.md)。
 
@@ -85,7 +85,7 @@ cargo run --locked -p trserial-desktop -- --data-dir .trserial/gui-smoke-linux -
 
 **自動更新**：預設在開啟時向 GitHub 取得公開的版本清單，只傳送版本查詢，不傳送帳號或使用資料；可在「設定」關閉，或按「立即檢查更新」。有新版本時主畫面會出現提示。Windows 安裝版會下載安裝程式並核對 `SHA256SUMS` 的檢查碼，通過後開啟安裝程式並結束 TRserial；Linux 會核對後替換程式檔並重新啟動；Windows 免安裝版會開啟下載頁。自動處理或兌換進行中時不能安裝更新。
 
-桌面版的 Discord 監聽顯示「未設定」，目前未提供 Token 設定介面；既有頻道 ID 僅供查看。需要 Discord 時使用下方選用 CLI 功能，Token 仍由環境變數提供。
+**Discord**：在「設定」勾選啟用、填入頻道 ID 並按「儲存設定」，再貼上 Bot Token 按「儲存 Token」。Token 存在 Windows Credential Manager／Linux Secret Service，不寫入設定檔，輸入框儲存後會清空。啟用後桌面版會在背景連線，頻道中的新序號直接匯入，不必先開始自動處理；兌換仍依自動處理與確認規則進行。總覽頁顯示連線狀態，Token 無效或沒有開啟 Message Content Intent 時會直接說明原因。Bot 的建立方式見下方「日後啟用 Discord」的第 1、2 步。
 
 ## 安裝 CLI
 
@@ -334,9 +334,9 @@ trserial daemon --mock examples/messages.json --once
 
 1. 在 Discord Developer Portal 建立官方 Bot，啟用 **Message Content Intent**。
 2. 邀請到目標伺服器，授予目標頻道的 View Channel、Read Message History 權限。
-3. 以 `cargo install --path . --locked --features discord` 編譯。
-4. 將 Token 設為執行環境的 `TRSERIAL_DISCORD_TOKEN`。
-5. 在設定中將 `[discord] enabled = true`，並填入 `channels = [實際頻道的數字ID]`，再執行 `trserial daemon`。
+3. 桌面版在「設定」完成即可。CLI 需以 `cargo install --path . --locked --features discord` 編譯。
+4. CLI 讀取 Token 的順序：先看執行環境的 `TRSERIAL_DISCORD_TOKEN`，沒有時使用桌面版存入系統憑證庫的 Token（同一個資料目錄）。
+5. CLI 在設定中將 `[discord] enabled = true`，並填入 `channels = [實際頻道的數字ID]`，再執行 `trserial daemon`。桌面版與 CLI daemon 不要同時監聽同一個資料目錄。
 
 Serenity 介接器會接收新訊息，使用相同解析器與去重邏輯。第一次啟用只讀取各頻道最近 100 則，之後根據 SQLite 游標分頁補抓；重新建立連線與恢復連線時也會補抓。游標只在訊息匯入完成後前進。補抓範圍為首次啟用時最近 100 則，以及游標之後仍存在的訊息原文。
 
