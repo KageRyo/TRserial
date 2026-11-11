@@ -9,10 +9,10 @@ use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
-    io::Write,
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
+use tokio::io::AsyncWriteExt;
 
 const RELEASES: &str = "https://api.github.com/repos/KageRyo/TRserial/releases";
 const CHECKSUMS: &str = "SHA256SUMS";
@@ -306,7 +306,9 @@ pub(crate) async fn download(
             .unwrap_or_default()
             .as_millis()
     ));
-    std::fs::create_dir(&dir).context("無法建立更新暫存資料夾")?;
+    tokio::fs::create_dir(&dir)
+        .await
+        .context("無法建立更新暫存資料夾")?;
     let path = dir.join(&asset.name);
     let result = async {
         let mut response = client
@@ -320,19 +322,19 @@ pub(crate) async fn download(
         if let Some(length) = response.content_length() {
             ensure!(length == asset.size, "下載檔大小與版本資訊不符");
         }
-        let mut file = std::fs::File::create(&path)?;
+        let mut file = tokio::fs::File::create(&path).await?;
         let mut verifier = Verifier::new(asset.size);
         while let Some(chunk) = response.chunk().await.context("下載更新檔中斷")? {
             verifier.update(&chunk)?;
-            file.write_all(&chunk)?;
+            file.write_all(&chunk).await?;
             progress(verifier.written, asset.size);
         }
-        file.sync_all()?;
+        file.sync_all().await?;
         verifier.finish(&expected)
     }
     .await;
     if let Err(error) = result {
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = tokio::fs::remove_dir_all(&dir).await;
         return Err(error);
     }
     Ok(path)
@@ -387,6 +389,8 @@ fn replace(staged: &Path, target: &Path) -> Result<()> {
         target.file_name().unwrap_or_default().to_string_lossy()
     ));
     let _ = std::fs::remove_file(&backup);
+    // Keep the permissions the user's copy already has instead of widening them.
+    std::fs::set_permissions(staged, std::fs::metadata(target)?.permissions())?;
     std::fs::hard_link(target, &backup)
         .with_context(|| format!("無法備份 {}", target.display()))?;
     if let Err(error) = std::fs::rename(staged, target) {
@@ -438,7 +442,7 @@ fn extract(archive: &Path, staging: &Path) -> Result<Vec<&'static str>> {
         let mut out = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .mode(0o755)
+            .mode(0o700)
             .open(staging.join(name))?;
         let written = std::io::copy(&mut (&mut entry).take(MAX_DOWNLOAD + 1), &mut out)?;
         ensure!(written == size, "更新檔中的 {name} 不完整");
@@ -635,6 +639,15 @@ mod tests {
         let desktop = dir.path().join("trserial-desktop");
         std::fs::write(&desktop, b"old desktop").unwrap();
         std::fs::write(dir.path().join("trserial"), b"old cli").unwrap();
+        let mode = |path: &Path| {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+        };
+        std::fs::set_permissions(
+            &desktop,
+            std::os::unix::fs::PermissionsExt::from_mode(0o750),
+        )
+        .unwrap();
         let package = archive(&[
             ("trserial-linux-amd64/README.md", b"docs"),
             ("trserial-linux-amd64/trserial-desktop", b"new desktop"),
@@ -645,6 +658,11 @@ mod tests {
         assert_eq!(
             std::fs::read(dir.path().join("trserial")).unwrap(),
             b"new cli"
+        );
+        assert_eq!(
+            mode(&desktop),
+            0o750,
+            "replacement keeps the existing permissions"
         );
         let leftovers: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()

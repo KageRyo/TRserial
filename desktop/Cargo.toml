@@ -13,7 +13,7 @@ gpui-kit = "=0.9.0"
 gpui-tray = { version = "=0.3.0", default-features = false, features = ["gpui-kit", "menu-state"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
 tokio-util = "0.7"
 zeroize = "1"
 serde = { version = "1", features = ["derive"] }

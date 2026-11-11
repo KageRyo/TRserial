@@ -469,7 +469,10 @@ impl<'a> Actor<'a> {
                     });
                 })
                 .await?;
-                apply(method, &path, &executable)
+                // Extracting and replacing files blocks; keep it off the event loop.
+                tokio::task::spawn_blocking(move || apply(method, &path, &executable))
+                    .await
+                    .context("更新安裝中斷")?
             }
             .await;
             handle.publish(|p| match result {
