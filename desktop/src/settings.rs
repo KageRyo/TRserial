@@ -1,10 +1,11 @@
 use crate::{
-    backend::{Command, Preferences},
+    backend::{Command, Preferences, UpdateState},
     ui::{self, Controller},
+    update,
 };
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{
-    ActiveTheme, Disableable, StyledExt,
+    ActiveTheme, Disableable, Sizable, StyledExt,
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
     h_flex,
@@ -141,6 +142,11 @@ impl Render for SettingsPage {
         let p = self.controller.read(cx).presentation.clone();
         let disabled = p.busy || p.state.is_busy() || !self.initialized;
         let browser_controller = self.controller.clone();
+        let update_controller = self.controller.clone();
+        let update_running = matches!(
+            p.update,
+            UpdateState::Checking | UpdateState::Downloading { .. } | UpdateState::Ready { .. }
+        );
         let mut body = v_flex()
             .gap_4()
             .p_4()
@@ -229,6 +235,36 @@ impl Render for SettingsPage {
                 "有系統匣時，關閉視窗會保留背景工作；暫停或停止請用主畫面或系統匣選單。",
                 cx,
             ))
+            .child(div().font_semibold().child("更新"))
+            .child(
+                Checkbox::new("settings-updates")
+                    .label("開啟時檢查新版本（連線到 GitHub）")
+                    .checked(self.preferences.check_updates)
+                    .disabled(disabled || p.offline)
+                    .on_change(cx.listener(|this, value, _, cx| {
+                        this.preferences.check_updates = *value;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .child(ui::muted(format!("目前版本 {}", update::current()), cx))
+                    .child(
+                        Button::new("settings-update-check")
+                            .small()
+                            .label("立即檢查更新")
+                            .disabled(p.offline || update_running)
+                            .on_click(move |_, _, cx| {
+                                ui::send(
+                                    &update_controller,
+                                    Command::CheckUpdate { interactive: true },
+                                    cx,
+                                )
+                            }),
+                    ),
+            )
             .child(div().font_semibold().child("Discord（選用）"))
             .child(ui::muted(
                 "桌面監聽未設定。此版本尚未提供安全的 Token 設定介面，使用 GUI 不需要 Discord。",

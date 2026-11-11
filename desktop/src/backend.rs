@@ -1,10 +1,10 @@
-use crate::platform;
+use crate::{platform, update};
 use anyhow::{Context, Result, ensure};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::OpenOptions,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -82,12 +82,42 @@ impl RunState {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Preferences {
     pub(crate) process_on_launch: bool,
     pub(crate) start_on_login: bool,
     pub(crate) dark: bool,
+    /// Ask GitHub for a newer release when the app starts.
+    pub(crate) check_updates: bool,
+}
+impl Default for Preferences {
+    fn default() -> Self {
+        Self {
+            process_on_launch: false,
+            start_on_login: false,
+            dark: false,
+            check_updates: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) enum UpdateState {
+    #[default]
+    Idle,
+    Checking,
+    Available(update::Release),
+    Downloading {
+        release: update::Release,
+        written: u64,
+        total: u64,
+    },
+    /// The new files are in place (Linux) or the installer is running
+    /// (Windows); the app exits and, on Linux, starts the new version.
+    Ready {
+        relaunch: bool,
+    },
 }
 
 #[derive(Clone, Default)]
@@ -106,6 +136,8 @@ pub(crate) struct Presentation {
     pub(crate) closed: bool,
     pub(crate) offline: bool,
     pub(crate) smoke_complete: bool,
+    pub(crate) update: UpdateState,
+    pub(crate) update_method: update::Method,
 }
 impl Presentation {
     pub(crate) fn browser_status(&self) -> String {
@@ -177,6 +209,10 @@ pub(crate) enum Command {
         preferences: Preferences,
     },
     Dismiss,
+    CheckUpdate {
+        interactive: bool,
+    },
+    InstallUpdate,
 }
 
 #[derive(Clone)]
@@ -289,6 +325,11 @@ struct Actor<'a> {
     active: Option<Active>,
     serial: u64,
     handle: &'a Backend,
+    /// Resolved at startup: on Linux an update replaces this file, after which
+    /// `current_exe` would name the deleted original.
+    executable: Option<PathBuf>,
+    update_method: update::Method,
+    update_task: Option<JoinHandle<()>>,
 }
 impl<'a> Actor<'a> {
     fn new(dir: PathBuf, config_path: PathBuf, offline: bool, handle: &'a Backend) -> Result<Self> {
@@ -323,10 +364,16 @@ impl<'a> Actor<'a> {
             preferences.process_on_launch = false;
         }
         preferences.start_on_login = platform::login_enabled();
+        let executable = std::env::current_exe().and_then(std::fs::canonicalize).ok();
+        let update_method = match executable.as_deref() {
+            Some(path) if !offline => update::method(path),
+            _ => update::Method::Manual,
+        };
         let data = service.snapshot()?;
         handle.publish(|p| {
             p.data = Some(Arc::new(data));
             p.preferences = preferences.clone();
+            p.update_method = update_method;
         });
         Ok(Self {
             _instance: instance,
@@ -339,7 +386,104 @@ impl<'a> Actor<'a> {
             active: None,
             serial: 0,
             handle,
+            executable,
+            update_method,
+            update_task: None,
         })
+    }
+    fn installing_update(&self) -> bool {
+        matches!(
+            self.handle.snapshot().update,
+            UpdateState::Downloading { .. } | UpdateState::Ready { .. }
+        )
+    }
+    fn updating(&self) -> bool {
+        self.update_task
+            .as_ref()
+            .is_some_and(|task| !task.is_finished())
+    }
+    /// Background check; `interactive` reports "up to date" and failures, while
+    /// the startup check stays silent when GitHub is unreachable.
+    fn check_update(&mut self, interactive: bool) -> Result<()> {
+        ensure!(!self.offline, "離線測試不檢查更新");
+        if self.updating() {
+            return Ok(());
+        }
+        let handle = self.handle.clone();
+        handle.publish(|p| p.update = UpdateState::Checking);
+        self.update_task = Some(tokio::spawn(async move {
+            let result = match update::client() {
+                Ok(client) => update::check(&client).await,
+                Err(error) => Err(error),
+            };
+            handle.publish(|p| {
+                p.update = UpdateState::Idle;
+                match result {
+                    Ok(Some(release)) => p.update = UpdateState::Available(release),
+                    Ok(None) if interactive => {
+                        p.notice = Some(format!("已是最新版本 {}", update::current()));
+                    }
+                    Err(error) if interactive => {
+                        p.error = Some(format!("檢查更新失敗：{error:#}"));
+                    }
+                    _ => {}
+                }
+            });
+        }));
+        Ok(())
+    }
+    fn install_update(&mut self) -> Result<()> {
+        ensure!(!self.offline, "離線測試不安裝更新");
+        ensure!(!self.updating(), "更新正在進行中");
+        ensure!(
+            self.active.is_none(),
+            "請先停止自動處理或目前的兌換，再安裝更新"
+        );
+        update::ensure_supported(self.update_method)?;
+        let UpdateState::Available(release) = self.handle.snapshot().update else {
+            anyhow::bail!("目前沒有可安裝的更新");
+        };
+        let executable = self.executable.clone().context("無法取得程式位置")?;
+        let method = self.update_method;
+        let handle = self.handle.clone();
+        handle.publish(|p| {
+            p.update = UpdateState::Downloading {
+                release: release.clone(),
+                written: 0,
+                total: release.asset.as_ref().map_or(0, |asset| asset.size),
+            }
+        });
+        self.update_task = Some(tokio::spawn(async move {
+            let result = async {
+                let client = update::client()?;
+                let path = update::download(&client, &release, |written, total| {
+                    handle.publish(|p| {
+                        if let UpdateState::Downloading {
+                            written: w,
+                            total: t,
+                            ..
+                        } = &mut p.update
+                        {
+                            (*w, *t) = (written, total);
+                        }
+                    });
+                })
+                .await?;
+                // Extracting and replacing files blocks; keep it off the event loop.
+                tokio::task::spawn_blocking(move || apply(method, &path, &executable))
+                    .await
+                    .context("更新安裝中斷")?
+            }
+            .await;
+            handle.publish(|p| match result {
+                Ok(relaunch) => p.update = UpdateState::Ready { relaunch },
+                Err(error) => {
+                    p.update = UpdateState::Available(release);
+                    p.error = Some(format!("更新失敗：{error:#}"));
+                }
+            });
+        }));
+        Ok(())
     }
     fn process(&mut self, command: Command) {
         self.serial = self.serial.wrapping_add(1);
@@ -418,6 +562,7 @@ impl<'a> Actor<'a> {
             Command::Redeem { plan, confirmed } => {
                 ensure!(!self.offline, "離線測試不執行正式兌換");
                 ensure!(self.active.is_none(), "請先暫停目前工作，再手動兌換");
+                ensure!(!self.installing_update(), "正在安裝更新，請等更新完成");
                 self.service.enqueue(&plan, confirmed)?;
                 self.active = Some(start_worker(
                     self.dir.clone(),
@@ -462,6 +607,7 @@ impl<'a> Actor<'a> {
                 confirmed,
             } => {
                 ensure!(self.active.is_none(), "已有工作執行中");
+                ensure!(!self.installing_update(), "正在安裝更新，請等更新完成");
                 ensure!(!backfill || confirmed, "歷史補抓需要明確確認");
                 ensure!(!self.offline || !backfill, "離線測試不補抓正式歷史序號");
                 self.active = Some(start_worker(
@@ -504,6 +650,7 @@ impl<'a> Actor<'a> {
             Command::CheckBrowser => {
                 ensure!(!self.offline, "離線測試不連線到官方網站");
                 ensure!(self.active.is_none(), "請先暫停目前工作，再檢查瀏覽器");
+                ensure!(!self.installing_update(), "正在安裝更新，請等更新完成");
                 self.active = Some(check_browser(
                     self.dir.clone(),
                     self.service.snapshot()?.config,
@@ -527,6 +674,14 @@ impl<'a> Actor<'a> {
                     p.notice = None;
                 });
                 Ok(None)
+            }
+            Command::CheckUpdate { interactive } => {
+                self.check_update(interactive)?;
+                Ok(None)
+            }
+            Command::InstallUpdate => {
+                self.install_update()?;
+                Ok(Some("正在下載更新，核對檢查碼後會自動安裝".into()))
             }
         }
     }
@@ -608,6 +763,12 @@ async fn run(
     handle: &Backend,
 ) -> Result<()> {
     let mut actor = Actor::new(dir, config_path, offline, handle)?;
+    if !offline {
+        update::cleanup_stale_downloads();
+        if actor.preferences.check_updates {
+            actor.check_update(false)?;
+        }
+    }
     if actor.preferences.process_on_launch && !offline {
         actor.active = Some(start_worker(
             actor.dir.clone(),
@@ -639,6 +800,31 @@ async fn run(
         let _ = active.task.await.context("結束背景工作時中斷")?;
     }
     result
+}
+
+/// Hands the verified download to the platform installer and reports whether
+/// the app should start the new version itself after it exits.
+fn apply(method: update::Method, path: &Path, executable: &Path) -> Result<bool> {
+    match method {
+        #[cfg(windows)]
+        update::Method::Installer => {
+            let _ = executable;
+            update::launch_installer(path)?;
+            Ok(false)
+        }
+        #[cfg(target_os = "linux")]
+        update::Method::ReplaceFiles => {
+            let replaced = update::replace_files(path, executable);
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+            replaced.map(|()| true)
+        }
+        _ => {
+            let _ = (path, executable);
+            anyhow::bail!("這個版本請從 GitHub 下載安裝")
+        }
+    }
 }
 
 fn start_worker(
