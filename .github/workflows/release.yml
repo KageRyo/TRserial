@@ -10,6 +10,10 @@ on:
   pull_request:
     paths:
       - .github/workflows/release.yml
+      - .github/scripts/desktop-smoke.ps1
+      - desktop/installer/**
+      - desktop/build.rs
+      - desktop/src/mark.rs
 permissions:
   contents: read
 concurrency:
@@ -84,40 +88,61 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $start = [System.Diagnostics.ProcessStartInfo]::new()
-          $start.FileName = (Resolve-Path "target\$env:TARGET\release\trserial-desktop.exe").Path
-          $start.Arguments = "--data-dir `"$env:RUNNER_TEMP\release-smoke`" --smoke-test"
-          $start.UseShellExecute = $false
-          $gui = [System.Diagnostics.Process]::Start($start)
-          if (-not $gui.WaitForExit(120000)) {
-            $gui.Kill($true)
-            throw 'Release desktop smoke test timed out'
-          }
-          $exitCode = $gui.ExitCode
-          $gui.Dispose()
-          if ($exitCode -ne 0) { throw "Release desktop smoke test failed: $exitCode" }
+          ./.github/scripts/desktop-smoke.ps1 -Exe "target\$env:TARGET\release\trserial-desktop.exe" -DataDir "$env:RUNNER_TEMP\release-smoke"
           & "target\$env:TARGET\release\trserial.exe" --help > $null
           if ($LASTEXITCODE -ne 0) { throw "CLI failed to start: $LASTEXITCODE" }
       - name: Package Linux archive
         if: runner.os == 'Linux'
         run: |
-          mkdir -p "dist/$PACKAGE"
+          mkdir -p "dist/$PACKAGE" release
           cp "target/$TARGET/release/trserial" "target/$TARGET/release/trserial-desktop" \
             README.md LICENSE config.example.toml "dist/$PACKAGE/"
-          tar -C dist -czf "$PACKAGE.tar.gz" "$PACKAGE"
-          echo "ARCHIVE=$PACKAGE.tar.gz" >> "$GITHUB_ENV"
-      - name: Package Windows archive
+          tar -C dist -czf "release/$PACKAGE.tar.gz" "$PACKAGE"
+      - name: Package Windows archive and portable executable
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          New-Item -ItemType Directory -Path release | Out-Null
           $dir = New-Item -ItemType Directory -Path "dist\$env:PACKAGE"
           Copy-Item "target\$env:TARGET\release\trserial.exe", "target\$env:TARGET\release\trserial-desktop.exe", README.md, LICENSE, config.example.toml -Destination $dir
-          Compress-Archive -Path $dir -DestinationPath "$env:PACKAGE.zip"
-          "ARCHIVE=$env:PACKAGE.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Compress-Archive -Path $dir -DestinationPath "release\$env:PACKAGE.zip"
+          Copy-Item "target\$env:TARGET\release\trserial-desktop.exe" "release\$env:PACKAGE-portable.exe"
+      - name: Build and check the Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco upgrade innosetup -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup install failed: $LASTEXITCODE" }
+          $iscc = Get-ChildItem "${env:ProgramFiles(x86)}", $env:ProgramFiles -Filter ISCC.exe -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $iscc) { throw 'ISCC.exe not found' }
+          # build.rs writes the icon it embeds; reuse it for the setup program.
+          $icon = Get-ChildItem "target\$env:TARGET\release\build" -Filter trserial.ico -Recurse | Select-Object -First 1
+          if (-not $icon) { throw 'Generated icon not found' }
+          $setup = "$env:PACKAGE-setup"
+          & $iscc.FullName "/DAppVersion=$($env:TAG.Substring(1))" "/DSourceDir=$((Resolve-Path "dist\$env:PACKAGE").Path)" `
+            "/DOutputDir=$((Resolve-Path release).Path)" "/DOutputName=$setup" "/DIconFile=$($icon.FullName)" desktop\installer\trserial.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed: $LASTEXITCODE" }
+
+          # Install for this user, run the installed copy, then uninstall it.
+          $app = "$env:RUNNER_TEMP\trserial-install"
+          $install = Start-Process "release\$setup.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=`"$app`"" -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "Installer failed: $($install.ExitCode)" }
+          $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'TRserial.lnk'
+          if (-not (Test-Path $shortcut)) { throw "Start menu shortcut missing: $shortcut" }
+          ./.github/scripts/desktop-smoke.ps1 -Exe "$app\trserial-desktop.exe" -DataDir "$env:RUNNER_TEMP\installed-smoke"
+          $remove = Start-Process "$app\unins000.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
+          if ($remove.ExitCode -ne 0) { throw "Uninstaller failed: $($remove.ExitCode)" }
+          # The uninstaller finishes from a temporary copy, so wait for the files to go.
+          $deadline = (Get-Date).AddSeconds(60)
+          while ((Test-Path "$app\trserial-desktop.exe") -or (Test-Path $shortcut)) {
+            if ((Get-Date) -gt $deadline) { throw 'Uninstall left the program or its shortcut behind' }
+            Start-Sleep -Seconds 1
+          }
+          Write-Host 'Installer installed, ran, and uninstalled cleanly'
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ env.PACKAGE }}
-          path: ${{ env.ARCHIVE }}
+          path: release/
           if-no-files-found: error
 
   draft:
@@ -144,6 +169,8 @@ jobs:
               echo "::error::$TAG is already published; refusing to replace its files"
               exit 1
             fi
+            # Point the draft at this build so publishing tags the commit the files came from.
+            gh release edit "$TAG" --target "$GITHUB_SHA"
             gh release upload "$TAG" trserial-* SHA256SUMS.txt --clobber
           else
             if gh api "repos/$GH_REPO/git/ref/tags/$TAG" > /dev/null 2>&1; then
