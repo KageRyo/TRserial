@@ -1,17 +1,18 @@
-; Per-user installer for the TRserial desktop app, built by the draft release
-; workflow. Pass the version and the folder holding the release files:
-;   iscc /DAppVersion=0.1.0 /DSourceDir=<dir> /DOutputDir=<dir> /DOutputName=<name> [/DIconFile=<ico>] trserial.iss
+; Per-user Windows installer, built by the draft release workflow:
+;   iscc /DAppVersion=0.1.0 /DAppBinaryVersion=0.1.0 /DSourceDir=<staging> [/DIconFile=<ico>] /O<dir> trserial.iss
+; SourceDir holds trserial-desktop.exe, trserial.exe, README.md, LICENSE.txt
+; and config.example.toml.
 #ifndef AppVersion
   #error Define AppVersion, for example /DAppVersion=0.1.0
 #endif
-#ifndef SourceDir
-  #error Define SourceDir as the folder with trserial-desktop.exe and trserial.exe
+#ifndef AppBinaryVersion
+  #define AppBinaryVersion AppVersion
 #endif
-#ifndef OutputDir
-  #define OutputDir "."
+#ifndef SourceDir
+  #error Define SourceDir as the staged Windows release folder
 #endif
 #ifndef OutputName
-  #define OutputName "trserial-setup"
+  #define OutputName "trserial-windows-amd64-setup"
 #endif
 
 [Setup]
@@ -20,53 +21,73 @@ AppId={{F6DF1C0A-902B-4C75-9DEC-81148DA92772}
 AppName=TRserial
 AppVersion={#AppVersion}
 AppVerName=TRserial {#AppVersion}
-AppPublisher=TRserial
+AppPublisher=KageRyo
 AppPublisherURL=https://github.com/KageRyo/TRserial
 AppSupportURL=https://github.com/KageRyo/TRserial/issues
-VersionInfoVersion={#AppVersion}
-; Installs for the current user only, so no administrator prompt.
-PrivilegesRequired=lowest
-DefaultDirName={autopf}\TRserial
+AppUpdatesURL=https://github.com/KageRyo/TRserial/releases/latest
+LicenseFile="{#SourceDir}\LICENSE.txt"
+#ifdef IconFile
+SetupIconFile="{#IconFile}"
+#endif
+; Per-user install: no administrator prompt.
+DefaultDirName={localappdata}\Programs\TRserial
+DefaultGroupName=TRserial
 DisableProgramGroupPage=yes
+PrivilegesRequired=lowest
+PrivilegesRequiredOverridesAllowed=commandline
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
-WizardStyle=modern
 UninstallDisplayName=TRserial
 UninstallDisplayIcon={app}\trserial-desktop.exe
-OutputDir={#OutputDir}
 OutputBaseFilename={#OutputName}
-#ifdef IconFile
-SetupIconFile={#IconFile}
-#endif
-Compression=lzma2
+Compression=lzma2/ultra64
 SolidCompression=yes
+WizardStyle=modern
+CloseApplications=yes
+RestartApplications=no
+ChangesAssociations=no
+VersionInfoCompany=KageRyo
+VersionInfoDescription=TRserial Windows installer
+VersionInfoProductName=TRserial
+VersionInfoVersion={#AppBinaryVersion}
+VersionInfoProductVersion={#AppBinaryVersion}
+VersionInfoTextVersion={#AppVersion}
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
-#if FileExists(AddBackslash(CompilerPath) + "Languages\ChineseTraditional.isl")
-Name: "chinesetraditional"; MessagesFile: "compiler:Languages\ChineseTraditional.isl"
-#endif
+Name: "chinesetraditional"; MessagesFile: "languages\ChineseTraditional.isl"
+
+[LangOptions]
+chinesetraditional.LanguageName=正體中文
+
+[CustomMessages]
+english.CreateDesktopShortcut=Create a desktop shortcut
+chinesetraditional.CreateDesktopShortcut=建立桌面捷徑
+english.AdditionalIcons=Additional icons:
+chinesetraditional.AdditionalIcons=其他圖示：
+english.LaunchTRserial=Launch TRserial
+chinesetraditional.LaunchTRserial=啟動 TRserial
 
 [Tasks]
-Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "desktopicon"; Description: "{cm:CreateDesktopShortcut}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
 Source: "{#SourceDir}\trserial-desktop.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\trserial.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#SourceDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#SourceDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\README.md"; DestDir: "{app}"; Flags: isreadme
+Source: "{#SourceDir}\LICENSE.txt"; DestDir: "{app}"; DestName: "LICENSE"; Flags: ignoreversion
 Source: "{#SourceDir}\config.example.toml"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\TRserial"; Filename: "{app}\trserial-desktop.exe"
-Name: "{autodesktop}\TRserial"; Filename: "{app}\trserial-desktop.exe"; Tasks: desktopicon
+Name: "{autoprograms}\TRserial"; Filename: "{app}\trserial-desktop.exe"; WorkingDir: "{app}"
+Name: "{autodesktop}\TRserial"; Filename: "{app}\trserial-desktop.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Registry]
 ; The app writes this value when "start at login" is on. Remove it with the
 ; program so Windows does not try to start a deleted file. Account data and
-; history in the user profile are kept.
+; redemption history in the user profile are kept.
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: "TRserial"; ValueType: none; Flags: uninsdeletevalue dontcreatekey
 
 [Run]
-Filename: "{app}\trserial-desktop.exe"; Description: "{cm:LaunchProgram,TRserial}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\trserial-desktop.exe"; Description: "{cm:LaunchTRserial}"; Flags: nowait postinstall skipifsilent
