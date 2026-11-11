@@ -3,7 +3,7 @@ use crate::{
     ui::{self, Controller, ShowCodes, ShowHistory, ShowSettings},
 };
 use gpui_kit::component::scroll::ScrollableElement;
-use gpui_kit::component::{Disableable, StyledExt, button::Button, h_flex, v_flex};
+use gpui_kit::component::{Disableable, Sizable, StyledExt, button::Button, h_flex, v_flex};
 use gpui_kit::{
     Context, Entity, InteractiveElement, IntoElement, ParentElement, Render, Styled, Subscription,
     Window, div,
@@ -26,7 +26,7 @@ impl Render for Dashboard {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.controller.read(cx).presentation.clone();
         let mut body = v_flex()
-            .gap_4()
+            .gap_3()
             .p_1()
             .child(ui::title("總覽"))
             .child(
@@ -63,13 +63,12 @@ impl Render for Dashboard {
                     data.jobs.iter().filter(|j| j.status == "unknown").count(),
                 ),
             ];
-            let mut summary = h_flex().gap_6().py_3();
+            let mut summary = h_flex().gap_6().py_1();
             for (label, count) in counters {
                 summary = summary.child(
                     v_flex()
-                        .gap_1()
                         .child(ui::muted(label, cx))
-                        .child(div().text_2xl().font_semibold().child(count.to_string())),
+                        .child(div().text_xl().font_semibold().child(count.to_string())),
                 );
             }
             body = body
@@ -79,16 +78,19 @@ impl Render for Dashboard {
                         .gap_2()
                         .child(
                             Button::new("dashboard-codes")
+                                .small()
                                 .label("序號與匯入")
                                 .on_click(|_, _, cx| cx.dispatch_action(&ShowCodes)),
                         )
                         .child(
                             Button::new("dashboard-history")
+                                .small()
                                 .label("兌換紀錄")
                                 .on_click(|_, _, cx| cx.dispatch_action(&ShowHistory)),
                         )
                         .child(
                             Button::new("dashboard-settings")
+                                .small()
                                 .label("設定")
                                 .on_click(|_, _, cx| cx.dispatch_action(&ShowSettings)),
                         ),
@@ -118,7 +120,7 @@ impl Render for Dashboard {
                         .child(ui::muted(code.rewards.join("、"), cx)),
                 );
             }
-            body = body.child(div().font_semibold().mt_3().child("最近活動"));
+            body = body.child(div().font_semibold().mt_1().child("最近活動"));
             if data.jobs.is_empty() {
                 body = body.child(ui::muted("目前沒有兌換工作", cx));
             }
@@ -141,6 +143,7 @@ impl Render for Dashboard {
             let controller = self.controller.clone();
             body = body.child(
                 Button::new("dashboard-backfill")
+                    .small()
                     .label("補抓歷史序號…")
                     .disabled(
                         p.busy
