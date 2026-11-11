@@ -33,14 +33,7 @@ impl Render for Dashboard {
                 h_flex()
                     .gap_3()
                     .child(div().font_semibold().child(p.state.label()))
-                    .child(ui::muted(
-                        if p.data.as_ref().is_some_and(|d| d.config.discord.enabled) {
-                            "Discord：桌面監聽未設定"
-                        } else {
-                            "Discord：停用"
-                        },
-                        cx,
-                    )),
+                    .child(ui::muted(p.discord.label(), cx)),
             )
             .child(div().text_sm().child(p.browser_status()));
         if let Some(data) = p.data.as_ref() {

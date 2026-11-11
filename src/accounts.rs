@@ -185,6 +185,44 @@ impl Accounts {
         self.0.execute("DELETE FROM accounts WHERE id=?1", [a.id])?;
         Ok(())
     }
+    /// The Discord Bot Token lives only in the OS credential store, under an
+    /// entry scoped to this data directory like the account passwords.
+    fn discord_entry(&self) -> Result<keyring::Entry> {
+        let seed: String = self.0.query_row(
+            "SELECT value FROM settings WHERE key='identity_seed'",
+            [],
+            |r| r.get(0),
+        )?;
+        let user = format!(
+            "discord-bot:{:x}",
+            Sha256::digest(format!("{seed}\0discord-bot").as_bytes())
+        );
+        keyring::Entry::new("TRserial", &user)
+            .map_err(|_| anyhow::anyhow!("作業系統憑證庫無法使用"))
+    }
+    pub fn set_discord_token(&self, token: &str) -> Result<()> {
+        let token = token.trim();
+        ensure!(
+            !token.is_empty() && !token.chars().any(char::is_whitespace),
+            "請貼上完整的 Discord Bot Token"
+        );
+        self.discord_entry()?
+            .set_password(token)
+            .map_err(|_| anyhow::anyhow!("無法儲存 Discord Token；請解鎖系統憑證庫後重試"))
+    }
+    pub fn discord_token(&self) -> Result<Option<Zeroizing<String>>> {
+        match self.discord_entry()?.get_password() {
+            Ok(token) => Ok(Some(Zeroizing::new(token))),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(_) => anyhow::bail!("無法讀取 Discord Token；請解鎖系統憑證庫"),
+        }
+    }
+    pub fn delete_discord_token(&self) -> Result<()> {
+        match self.discord_entry()?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(_) => anyhow::bail!("無法從系統憑證庫移除 Discord Token"),
+        }
+    }
 }
 fn entry(a: &Account) -> Result<keyring::Entry> {
     keyring::Entry::new("TRserial", &a.id).map_err(|_| anyhow::anyhow!("作業系統憑證庫無法使用"))

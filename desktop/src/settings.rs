@@ -24,6 +24,9 @@ pub(crate) struct SettingsPage {
     endpoint: Entity<InputState>,
     delay: Entity<InputState>,
     verification: Entity<InputState>,
+    channels: Entity<InputState>,
+    discord_token: Entity<InputState>,
+    discord_enabled: bool,
     managed: bool,
     notifications: bool,
     preferences: Preferences,
@@ -44,6 +47,9 @@ impl SettingsPage {
             endpoint: ui::input("WebDriver 位址", window, cx),
             delay: ui::input("兌換間隔（秒）", window, cx),
             verification: ui::input("驗證等待上限（秒）", window, cx),
+            channels: ui::input("例如 123456789012345678, 234567890123456789", window, cx),
+            discord_token: ui::input("貼上 Bot Token", window, cx),
+            discord_enabled: false,
             managed: false,
             notifications: true,
             preferences: Preferences::default(),
@@ -79,10 +85,21 @@ impl SettingsPage {
                     &self.verification,
                     data.config.verification_timeout_seconds.to_string(),
                 ),
+                (
+                    &self.channels,
+                    data.config
+                        .discord
+                        .channels
+                        .iter()
+                        .map(u64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
             ] {
                 field.update(cx, |s, cx| s.set_value(value, window, cx));
             }
             self.managed = data.config.driver.managed;
+            self.discord_enabled = data.config.discord.enabled;
             self.notifications = data.config.notifications;
             self.preferences = p.preferences;
             self.initialized = true;
@@ -115,6 +132,12 @@ impl SettingsPage {
                 .map_err(|_| anyhow::anyhow!("驗證等待上限請輸入整數秒數"))?;
             config.driver.managed = self.managed;
             config.notifications = self.notifications;
+            config.discord.enabled = self.discord_enabled;
+            config.discord.channels = parse_channels(&self.channels.read(cx).value())?;
+            anyhow::ensure!(
+                !config.discord.enabled || !config.discord.channels.is_empty(),
+                "啟用 Discord 前請填入至少一個頻道 ID"
+            );
             config.validate()?;
             Ok(())
         })();
@@ -136,6 +159,38 @@ impl SettingsPage {
             }
         }
     }
+    fn save_token(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let token = zeroize::Zeroizing::new(self.discord_token.read(cx).value().trim().to_owned());
+        if token.is_empty() {
+            self.error = Some("請先貼上 Discord Bot Token".into());
+            cx.notify();
+            return;
+        }
+        // Clear the field at once; the token only travels to the OS credential store.
+        self.discord_token
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        self.error = None;
+        ui::send(&self.controller, Command::SaveDiscordToken(token), cx);
+    }
+}
+
+/// Channel IDs separated by commas, Chinese commas or whitespace, without duplicates.
+fn parse_channels(text: &str) -> anyhow::Result<Vec<u64>> {
+    let mut channels = Vec::new();
+    for part in text
+        .split(|c: char| c == ',' || c == '，' || c == '、' || c.is_whitespace())
+        .filter(|part| !part.is_empty())
+    {
+        let id = part
+            .parse::<u64>()
+            .ok()
+            .filter(|id| *id > 0)
+            .ok_or_else(|| anyhow::anyhow!("頻道 ID 必須是數字：{part}"))?;
+        if !channels.contains(&id) {
+            channels.push(id);
+        }
+    }
+    Ok(channels)
 }
 impl Render for SettingsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -143,6 +198,7 @@ impl Render for SettingsPage {
         let disabled = p.busy || p.state.is_busy() || !self.initialized;
         let browser_controller = self.controller.clone();
         let update_controller = self.controller.clone();
+        let token_controller = self.controller.clone();
         let update_running = matches!(
             p.update,
             UpdateState::Checking | UpdateState::Downloading { .. } | UpdateState::Ready { .. }
@@ -267,28 +323,69 @@ impl Render for SettingsPage {
             )
             .child(div().font_semibold().child("Discord（選用）"))
             .child(ui::muted(
-                "桌面監聽未設定。此版本尚未提供安全的 Token 設定介面，使用 GUI 不需要 Discord。",
+                "在 Discord Developer Portal 建立 Bot、開啟 Message Content Intent，邀請到伺服器並給予讀取頻道與訊息紀錄的權限。在 Discord 開啟開發者模式後，對頻道按右鍵即可複製頻道 ID。",
                 cx,
-            ));
-        if let Some(data) = p.data.as_ref() {
-            body = body.child(ui::muted(
-                format!(
-                    "既有頻道 ID：{}",
-                    if data.config.discord.channels.is_empty() {
-                        "未設定".into()
-                    } else {
-                        data.config
-                            .discord
-                            .channels
-                            .iter()
-                            .map(u64::to_string)
-                            .collect::<Vec<_>>()
-                            .join("、")
-                    }
-                ),
-                cx,
-            ));
-        }
+            ))
+            .child(
+                Checkbox::new("settings-discord")
+                    .label("啟用 Discord 監聽，自動匯入頻道中的序號")
+                    .checked(self.discord_enabled)
+                    .disabled(disabled || p.offline)
+                    .on_change(cx.listener(|this, value, _, cx| {
+                        this.discord_enabled = *value;
+                        cx.notify();
+                    })),
+            )
+            .child(ui::field(
+                "settings-discord-channels",
+                "頻道 ID（以逗號或空白分隔）",
+                &self.channels,
+            ))
+            .child(ui::secret_field(
+                "settings-discord-token",
+                "Bot Token",
+                &self.discord_token,
+            ))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        Button::new("settings-discord-token-save")
+                            .small()
+                            .label("儲存 Token")
+                            .disabled(p.busy || p.offline)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.save_token(window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("settings-discord-token-clear")
+                            .small()
+                            .label("移除 Token")
+                            .disabled(p.busy || p.offline || !p.discord_token_saved)
+                            .on_click(move |_, window, cx| {
+                                let controller = token_controller.clone();
+                                ui::confirm(
+                                    window,
+                                    cx,
+                                    "移除 Discord Bot Token？",
+                                    "會從系統憑證庫刪除 Token 並停止 Discord 監聽，已匯入的序號不受影響。",
+                                    "移除 Token",
+                                    move |cx| ui::send(&controller, Command::ClearDiscordToken, cx),
+                                );
+                            }),
+                    )
+                    .child(ui::muted(
+                        if p.discord_token_saved {
+                            "Token 已存在系統憑證庫，不會寫入設定檔"
+                        } else {
+                            "尚未儲存 Token"
+                        },
+                        cx,
+                    )),
+            )
+            .child(div().text_sm().child(p.discord.label()));
         body=body.child(div().font_semibold().child("瀏覽器檢查"))
             .child(ui::muted("會開啟官方表單檢查定位，不填入帳密或送出序號。桌面兌換會顯示 Chrome，供你完成人工驗證。",cx))
             .child(Button::new("settings-browser-check").label("檢查 Chrome 與官方表單").disabled(disabled||p.offline).on_click(move|_,_,cx|ui::send(&browser_controller,Command::CheckBrowser,cx)));
@@ -330,5 +427,19 @@ impl Render for SettingsPage {
                             })),
                     ),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn channel_ids_accept_common_separators_and_reject_non_numbers() {
+        assert_eq!(
+            super::parse_channels("123, 456 789，123、42").unwrap(),
+            [123, 456, 789, 42]
+        );
+        assert!(super::parse_channels("  ").unwrap().is_empty());
+        assert!(super::parse_channels("123 abc").is_err());
+        assert!(super::parse_channels("0").is_err());
     }
 }

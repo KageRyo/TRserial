@@ -8,7 +8,7 @@ license = "MIT"
 description = "Native desktop interface for TRserial"
 
 [dependencies]
-trserial = { path = ".." }
+trserial = { path = "..", features = ["discord"] }
 gpui-kit = "=0.9.0"
 gpui-tray = { version = "=0.3.0", default-features = false, features = ["gpui-kit", "menu-state"] }
 anyhow = "1"

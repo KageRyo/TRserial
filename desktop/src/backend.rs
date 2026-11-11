@@ -8,12 +8,15 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{
+    sync::{mpsc, watch},
+    task::JoinHandle,
+};
 use tokio_util::sync::CancellationToken;
 use trserial::{
     accounts::Accounts,
     browser::{BrowserRedeemer, Redeemer},
-    config::Config,
+    config::{Config, DiscordConfig},
     service::{RedemptionPlan, RedemptionSession, RunScope, Service, Snapshot},
     store::{AttemptRecord, Store},
     worker::{StoredCredentials, WorkerLock},
@@ -120,6 +123,39 @@ pub(crate) enum UpdateState {
     },
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum DiscordState {
+    #[default]
+    Disabled,
+    NeedsChannels,
+    NeedsToken,
+    Connecting,
+    Connected,
+    Problem(String),
+}
+impl DiscordState {
+    pub(crate) fn label(&self) -> String {
+        match self {
+            Self::Disabled => "Discord：停用".into(),
+            Self::NeedsChannels => "Discord：尚未設定頻道".into(),
+            Self::NeedsToken => "Discord：尚未設定 Bot Token".into(),
+            Self::Connecting => "Discord：連線中".into(),
+            Self::Connected => "Discord：已連線".into(),
+            Self::Problem(reason) => format!("Discord：{reason}"),
+        }
+    }
+}
+impl From<trserial::discord::Status> for DiscordState {
+    fn from(status: trserial::discord::Status) -> Self {
+        use trserial::discord::Status;
+        match status {
+            Status::Connecting => Self::Connecting,
+            Status::Connected => Self::Connected,
+            Status::Degraded(reason) | Status::Stopped(reason) => Self::Problem(reason),
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct Presentation {
     pub(crate) revision: u64,
@@ -138,6 +174,11 @@ pub(crate) struct Presentation {
     pub(crate) smoke_complete: bool,
     pub(crate) update: UpdateState,
     pub(crate) update_method: update::Method,
+    pub(crate) discord: DiscordState,
+    /// Increases on every listener restart so late reports from a replaced
+    /// listener cannot overwrite the current state.
+    pub(crate) discord_generation: u64,
+    pub(crate) discord_token_saved: bool,
 }
 impl Presentation {
     pub(crate) fn browser_status(&self) -> String {
@@ -213,6 +254,8 @@ pub(crate) enum Command {
         interactive: bool,
     },
     InstallUpdate,
+    SaveDiscordToken(Zeroizing<String>),
+    ClearDiscordToken,
 }
 
 #[derive(Clone)]
@@ -330,6 +373,8 @@ struct Actor<'a> {
     executable: Option<PathBuf>,
     update_method: update::Method,
     update_task: Option<JoinHandle<()>>,
+    discord: Option<(CancellationToken, JoinHandle<()>)>,
+    discord_generation: u64,
 }
 impl<'a> Actor<'a> {
     fn new(dir: PathBuf, config_path: PathBuf, offline: bool, handle: &'a Backend) -> Result<Self> {
@@ -389,7 +434,89 @@ impl<'a> Actor<'a> {
             executable,
             update_method,
             update_task: None,
+            discord: None,
+            discord_generation: 0,
         })
+    }
+    /// What the listener needs, or the state to show when it cannot start.
+    fn discord_ready(
+        &self,
+    ) -> std::result::Result<(DiscordConfig, Zeroizing<String>), DiscordState> {
+        let problem = |error: anyhow::Error| DiscordState::Problem(error.to_string());
+        if self.offline {
+            return Err(DiscordState::Disabled);
+        }
+        let config = self.service.snapshot().map_err(problem)?.config.discord;
+        if !config.enabled {
+            return Err(DiscordState::Disabled);
+        }
+        if config.channels.is_empty() {
+            return Err(DiscordState::NeedsChannels);
+        }
+        let accounts = Accounts::open(&self.dir).map_err(problem)?;
+        if accounts.discord_token().map_err(problem)?.is_none()
+            && std::env::var_os("TRSERIAL_DISCORD_TOKEN").is_none()
+        {
+            return Err(DiscordState::NeedsToken);
+        }
+        let token = trserial::discord::resolve_token(&accounts).map_err(problem)?;
+        Ok((config, token))
+    }
+    /// Stops any running listener and starts one for the saved settings. The
+    /// listener only imports messages; redemption still follows the worker.
+    fn restart_discord(&mut self) {
+        if let Some((cancel, _)) = self.discord.take() {
+            cancel.cancel();
+        }
+        self.discord_generation += 1;
+        let generation = self.discord_generation;
+        let token_saved = !self.offline
+            && Accounts::open(&self.dir)
+                .and_then(|accounts| accounts.discord_token())
+                .is_ok_and(|token| token.is_some());
+        let state = match self.discord_ready() {
+            Err(state) => state,
+            Ok((config, token)) => {
+                let cancel = CancellationToken::new();
+                let (sender, mut receiver) = watch::channel(trserial::discord::Status::Connecting);
+                let (dir, handle, stop) = (self.dir.clone(), self.handle.clone(), cancel.clone());
+                let publish = move |handle: &Backend, state: DiscordState| {
+                    handle.publish(|p| {
+                        if p.discord_generation == generation {
+                            p.discord = state;
+                        }
+                    });
+                };
+                let task = tokio::spawn(async move {
+                    match trserial::discord::start(&config, &dir, token, Some(sender), stop).await {
+                        Ok(Some(listener)) => {
+                            let forward = async {
+                                while receiver.changed().await.is_ok() {
+                                    let status = receiver.borrow_and_update().clone();
+                                    publish(&handle, status.into());
+                                }
+                            };
+                            let _ = tokio::join!(forward, listener);
+                        }
+                        Ok(None) => publish(&handle, DiscordState::Disabled),
+                        Err(error) => publish(&handle, DiscordState::Problem(format!("{error:#}"))),
+                    }
+                });
+                self.discord = Some((cancel, task));
+                DiscordState::Connecting
+            }
+        };
+        self.handle.publish(|p| {
+            p.discord_generation = generation;
+            p.discord = state;
+            p.discord_token_saved = token_saved;
+        });
+    }
+    async fn stop_discord(&mut self) {
+        if let Some((cancel, task)) = self.discord.take() {
+            cancel.cancel();
+            let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+        }
     }
     fn installing_update(&self) -> bool {
         matches!(
@@ -665,7 +792,11 @@ impl<'a> Actor<'a> {
                 config,
                 preferences: next,
             } => {
+                let discord_changed = self.service.snapshot()?.config.discord != config.discord;
                 self.save_settings(config, next)?;
+                if discord_changed {
+                    self.restart_discord();
+                }
                 Ok(Some("設定已儲存".into()))
             }
             Command::Dismiss => {
@@ -682,6 +813,18 @@ impl<'a> Actor<'a> {
             Command::InstallUpdate => {
                 self.install_update()?;
                 Ok(Some("正在下載更新，核對檢查碼後會自動安裝".into()))
+            }
+            Command::SaveDiscordToken(token) => {
+                ensure!(!self.offline, "離線測試不設定 Discord");
+                Accounts::open(&self.dir)?.set_discord_token(&token)?;
+                self.restart_discord();
+                Ok(Some("Discord Bot Token 已存入系統憑證庫".into()))
+            }
+            Command::ClearDiscordToken => {
+                ensure!(!self.offline, "離線測試不設定 Discord");
+                Accounts::open(&self.dir)?.delete_discord_token()?;
+                self.restart_discord();
+                Ok(Some("已從系統憑證庫移除 Discord Bot Token".into()))
             }
         }
     }
@@ -769,6 +912,7 @@ async fn run(
             actor.check_update(false)?;
         }
     }
+    actor.restart_discord();
     if actor.preferences.process_on_launch && !offline {
         actor.active = Some(start_worker(
             actor.dir.clone(),
@@ -794,6 +938,7 @@ async fn run(
     }
     .await;
     handle.publish(|p| p.state = RunState::Quitting);
+    actor.stop_discord().await;
     if let Some(mut active) = actor.active.take() {
         active.cancel(RunState::Stopped);
         // Cancellation is a normal shutdown outcome for a read-only browser check.

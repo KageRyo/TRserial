@@ -37,6 +37,12 @@ fn unavailable_os_store_does_not_save_account_or_fall_back_to_plaintext() {
     );
     assert!(accounts.list().unwrap()[0].session_only);
     assert!(trserial::accounts::stored_credentials(&account).is_err());
+    assert!(
+        accounts
+            .set_discord_token("DO-NOT-SAVE-THIS-PASSWORD")
+            .is_err()
+    );
+    assert!(accounts.discord_token().is_err());
     let bytes = std::fs::read(dir.path().join("accounts.sqlite")).unwrap();
     assert!(
         !bytes
