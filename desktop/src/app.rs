@@ -98,27 +98,27 @@ impl Render for Shell {
                     .child(
                         SidebarMenuItem::new("總覽")
                             .active(page == Page::Dashboard)
-                            .on_click(|_, _, cx| cx.dispatch_action(&ShowDashboard)),
+                            .on_click(ui::dispatch(ShowDashboard)),
                     )
                     .child(
                         SidebarMenuItem::new("序號")
                             .active(page == Page::Codes)
-                            .on_click(|_, _, cx| cx.dispatch_action(&ShowCodes)),
+                            .on_click(ui::dispatch(ShowCodes)),
                     )
                     .child(
                         SidebarMenuItem::new("帳號")
                             .active(page == Page::Accounts)
-                            .on_click(|_, _, cx| cx.dispatch_action(&ShowAccounts)),
+                            .on_click(ui::dispatch(ShowAccounts)),
                     )
                     .child(
                         SidebarMenuItem::new("兌換紀錄")
                             .active(page == Page::History)
-                            .on_click(|_, _, cx| cx.dispatch_action(&ShowHistory)),
+                            .on_click(ui::dispatch(ShowHistory)),
                     )
                     .child(
                         SidebarMenuItem::new("設定")
                             .active(page == Page::Settings)
-                            .on_click(|_, _, cx| cx.dispatch_action(&ShowSettings)),
+                            .on_click(ui::dispatch(ShowSettings)),
                     ),
             )
             .footer(SidebarFooter::new().child(ui::muted("跑Online\nTalesRunner", cx)));
@@ -136,21 +136,21 @@ impl Render for Shell {
                             "開始自動處理"
                         })
                         .disabled(p.busy || p.data.is_none() || (p.state.is_busy() && !active))
-                        .on_click(|_, _, cx| cx.dispatch_action(&ToggleProcessing)),
+                        .on_click(ui::dispatch(ToggleProcessing)),
                 )
                 .child(
                     Button::new("processing-stop")
                         .small()
                         .label("停止")
                         .disabled(p.busy || !p.state.is_busy())
-                        .on_click(|_, _, cx| cx.dispatch_action(&StopProcessing)),
+                        .on_click(ui::dispatch(StopProcessing)),
                 )
                 .child(
                     Button::new("app-quit")
                         .small()
                         .ghost()
                         .label("結束")
-                        .on_click(|_, _, cx| cx.dispatch_action(&QuitApp)),
+                        .on_click(ui::dispatch(QuitApp)),
                 ),
         );
         if p.offline {
@@ -721,5 +721,43 @@ mod native_render_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod click_tests {
+    use super::Shell;
+    use crate::{
+        testing::Fixture,
+        ui::{ShowCodes, ToggleProcessing},
+    };
+    use gpui_kit::test::TestWindowExt;
+    use gpui_kit::{AppContext, TestAppContext};
+    use std::{cell::RefCell, rc::Rc};
+
+    /// GPUI holds the window while it delivers a click. Handlers that call
+    /// `App::dispatch_action` try to re-enter the active window, fail, and
+    /// drop the action, so buttons and the sidebar did nothing on Windows.
+    #[gpui_kit::test]
+    fn clicks_in_the_active_window_reach_app_actions(cx: &mut TestAppContext) {
+        let fixture = Fixture::new();
+        let (window, _, _) = fixture.open(cx, |controller, window, cx| {
+            cx.new(|cx| Shell::new(controller, window, cx))
+        });
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        cx.update(|cx| {
+            let codes = seen.clone();
+            cx.on_action(move |_: &ShowCodes, _| codes.borrow_mut().push("codes"));
+            let toggle = seen.clone();
+            cx.on_action(move |_: &ToggleProcessing, _| toggle.borrow_mut().push("toggle"));
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.activate_window();
+            window.render_frame(cx);
+            window.click("dashboard-codes", cx);
+            window.click("processing-toggle", cx);
+        })
+        .unwrap();
+        assert_eq!(*seen.borrow(), ["codes", "toggle"]);
     }
 }

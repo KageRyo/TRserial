@@ -80,19 +80,19 @@ impl Render for Dashboard {
                             Button::new("dashboard-codes")
                                 .small()
                                 .label("序號與匯入")
-                                .on_click(|_, _, cx| cx.dispatch_action(&ShowCodes)),
+                                .on_click(ui::dispatch(ShowCodes)),
                         )
                         .child(
                             Button::new("dashboard-history")
                                 .small()
                                 .label("兌換紀錄")
-                                .on_click(|_, _, cx| cx.dispatch_action(&ShowHistory)),
+                                .on_click(ui::dispatch(ShowHistory)),
                         )
                         .child(
                             Button::new("dashboard-settings")
                                 .small()
                                 .label("設定")
-                                .on_click(|_, _, cx| cx.dispatch_action(&ShowSettings)),
+                                .on_click(ui::dispatch(ShowSettings)),
                         ),
                 )
                 .child(div().font_semibold().child("最近序號"));
