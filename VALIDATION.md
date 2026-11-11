@@ -87,6 +87,18 @@ GUI 分支從已合併的 PR #1（`bee7492`）開始。使用 GPUI Kit `0.9.0`�
 
 GUI CI 在 Ubuntu 與 Windows 分別執行嚴格 Clippy、一般測試、原生程序 smoke test 與最佳化編譯。CLI 的 Windows／Linux 測試與本機假網站瀏覽器整合測試保留。一般 CLI 建置不需 GUI 系統函式庫。
 
+### GitHub Actions 結果
+
+2026-11-07，PR #2 提交 `43af45a` 由 push 與 pull_request 各觸發一次 CI，兩次全部通過。SonarCloud 新增問題為 0。
+
+| 項目 | 結果 |
+| --- | --- |
+| `rust`（Ubuntu／Windows） | 嚴格 Clippy、37 項一般測試、2 項本機假網站瀏覽器測試、全功能測試與 release build 通過 |
+| `desktop`（Ubuntu） | 9 項 GUI 測試通過。`native_tray` 在 Xvfb 與測試用 D-Bus 上完成 StatusNotifierItem 註冊、以 Activate 還原視窗，沒有 host 時保留主視窗 |
+| `desktop`（Windows） | 9 項 GUI 測試通過。原生 smoke test 偵測到系統匣後收起視窗，確認背景工作持續，再以顯示動作還原；五頁繪製、背景啟停與正常結束也完成 |
+
+`capture_all_pages_with_native_renderer` 需要實際 Vulkan renderer，CI 不執行，只在本機檢查。Windows 的系統匣點擊與選單沒有自動化，列在下方實機驗收。
+
 ### 桌面實機驗收
 
 | 平台／功能 | 驗收內容 |
