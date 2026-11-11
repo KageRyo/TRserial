@@ -25,6 +25,31 @@ use gpui_kit::{
 use gpui_tray::{Icon, Tray};
 use std::time::Duration;
 
+/// Fits a 1366×768 laptop above the taskbar; a small utility should not
+/// take over a 1080p screen.
+fn window_size() -> gpui_kit::Size<gpui_kit::Pixels> {
+    size(px(960.), px(640.))
+}
+/// Smallest size where the account and code side panels still sit beside
+/// their tables.
+fn min_window_size() -> gpui_kit::Size<gpui_kit::Pixels> {
+    size(px(800.), px(540.))
+}
+/// GPUI Kit derives text and spacing from the rem size. 15px instead of the
+/// 16px default gives a compact utility layout while secondary text stays at
+/// about 13px.
+fn compact_theme(theme: &mut Theme) {
+    theme.font_size = px(15.);
+    #[cfg(target_os = "linux")]
+    {
+        theme.font_family = "Noto Sans CJK TC".into();
+    }
+    #[cfg(windows)]
+    {
+        theme.font_family = "Segoe UI".into();
+    }
+}
+
 struct Shell {
     controller: Entity<Controller>,
     dashboard: Entity<Dashboard>,
@@ -98,12 +123,13 @@ impl Render for Shell {
             )
             .footer(SidebarFooter::new().child(ui::muted("跑Online\nTalesRunner", cx)));
         let active = matches!(p.state, RunState::Running | RunState::Manual);
-        let mut workspace = v_flex().flex_1().min_w_0().min_h_0().gap_3().p_4().child(
+        let mut workspace = v_flex().flex_1().min_w_0().min_h_0().gap_2().p_3().child(
             h_flex()
                 .gap_2()
                 .child(div().flex_1().text_sm().child(p.state.label()))
                 .child(
                     Button::new("processing-toggle")
+                        .small()
                         .label(if active {
                             "暫停"
                         } else {
@@ -114,12 +140,14 @@ impl Render for Shell {
                 )
                 .child(
                     Button::new("processing-stop")
+                        .small()
                         .label("停止")
                         .disabled(p.busy || !p.state.is_busy())
                         .on_click(|_, _, cx| cx.dispatch_action(&StopProcessing)),
                 )
                 .child(
                     Button::new("app-quit")
+                        .small()
                         .ghost()
                         .label("結束")
                         .on_click(|_, _, cx| cx.dispatch_action(&QuitApp)),
@@ -211,8 +239,8 @@ fn show(cx: &mut App) {
     controller.update(cx, |c, _| c.presentation = c.backend.snapshot());
     let options = WindowOptions {
         // Native window geometry is intentionally independent of control spacing.
-        window_bounds: Some(WindowBounds::centered(size(px(1100.), px(760.)), cx)),
-        window_min_size: Some(size(px(900.), px(600.))),
+        window_bounds: Some(WindowBounds::centered(window_size(), cx)),
+        window_min_size: Some(min_window_size()),
         titlebar: Some(TitlebarOptions {
             title: Some("TRserial".into()),
             ..Default::default()
@@ -379,16 +407,7 @@ pub(crate) fn run(backend: Backend, smoke: bool) {
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx| {
             gpui_kit::init(cx);
-            Theme::update(cx, |theme| {
-                #[cfg(target_os = "linux")]
-                {
-                    theme.font_family = "Noto Sans CJK TC".into();
-                }
-                #[cfg(windows)]
-                {
-                    theme.font_family = "Segoe UI".into();
-                }
-            });
+            Theme::update(cx, compact_theme);
             Theme::change(
                 if backend.snapshot().preferences.dark {
                     ThemeMode::Dark
@@ -620,7 +639,7 @@ mod native_render_tests {
     };
     use gpui_kit::component::{Theme, ThemeMode};
     use gpui_kit::test::TestWindowExt;
-    use gpui_kit::{AppContext, Bounds, HeadlessAppContext, WindowBounds, WindowOptions, px, size};
+    use gpui_kit::{AppContext, Bounds, HeadlessAppContext, WindowBounds, WindowOptions};
     use std::{path::PathBuf, sync::Arc};
 
     #[test]
@@ -665,50 +684,55 @@ mod native_render_tests {
             gpui_kit::platform::current_headless_renderer,
         );
         cx.update(gpui_kit::init);
-        cx.update(|cx| Theme::update(cx, |theme| theme.font_family = "Noto Sans CJK TC".into()));
-        let (window, controller) = cx.update(|cx| {
-            let controller = cx.new(|_| Controller::new(fixture.backend.clone()));
-            let (window, _) = gpui_kit::open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(Bounds {
-                        origin: Default::default(),
-                        size: size(px(1100.), px(760.)),
-                    })),
-                    show: false,
-                    focus: false,
-                    ..Default::default()
-                },
-                cx,
-                |window, cx| cx.new(|cx| Shell::new(controller.clone(), window, cx)),
-            )
-            .unwrap();
-            (window, controller)
-        });
+        cx.update(|cx| Theme::update(cx, super::compact_theme));
+        let controller = cx.update(|cx| cx.new(|_| Controller::new(fixture.backend.clone())));
         let destination = std::env::var_os("TRSERIAL_SCREENSHOTS")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("target/desktop-screenshots"));
         std::fs::create_dir_all(&destination).unwrap();
-        for (theme_name, theme) in [("light", ThemeMode::Light), ("dark", ThemeMode::Dark)] {
-            cx.update(|cx| Theme::change(theme, None, cx));
-            for (name, page) in [
-                ("dashboard", Page::Dashboard),
-                ("accounts", Page::Accounts),
-                ("codes", Page::Codes),
-                ("history", Page::History),
-                ("settings", Page::Settings),
-            ] {
-                cx.update(|cx| {
-                    controller.update(cx, |c, cx| {
-                        c.page = page;
-                        cx.notify();
-                    })
-                });
-                cx.update_window(window, |_, window, cx| window.render_frame(cx))
-                    .unwrap();
-                cx.capture_screenshot(window)
-                    .unwrap()
-                    .save(destination.join(format!("{name}-{theme_name}.png")))
-                    .unwrap();
+        for (size_name, window_size) in [
+            ("default", super::window_size()),
+            ("min", super::min_window_size()),
+        ] {
+            let window = cx.update(|cx| {
+                gpui_kit::open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(Bounds {
+                            origin: Default::default(),
+                            size: window_size,
+                        })),
+                        show: false,
+                        focus: false,
+                        ..Default::default()
+                    },
+                    cx,
+                    |window, cx| cx.new(|cx| Shell::new(controller.clone(), window, cx)),
+                )
+                .unwrap()
+                .0
+            });
+            for (theme_name, theme) in [("light", ThemeMode::Light), ("dark", ThemeMode::Dark)] {
+                cx.update(|cx| Theme::change(theme, None, cx));
+                for (name, page) in [
+                    ("dashboard", Page::Dashboard),
+                    ("accounts", Page::Accounts),
+                    ("codes", Page::Codes),
+                    ("history", Page::History),
+                    ("settings", Page::Settings),
+                ] {
+                    cx.update(|cx| {
+                        controller.update(cx, |c, cx| {
+                            c.page = page;
+                            cx.notify();
+                        })
+                    });
+                    cx.update_window(window, |_, window, cx| window.render_frame(cx))
+                        .unwrap();
+                    cx.capture_screenshot(window)
+                        .unwrap()
+                        .save(destination.join(format!("{name}-{theme_name}-{size_name}.png")))
+                        .unwrap();
+                }
             }
         }
     }

@@ -81,7 +81,7 @@ pub(crate) fn secret_field(
     )
 }
 pub(crate) fn title(text: &'static str) -> Div {
-    div().text_xl().font_semibold().child(text)
+    div().text_lg().font_semibold().child(text)
 }
 pub(crate) fn muted(text: impl Into<SharedString>, cx: &App) -> Div {
     div()
