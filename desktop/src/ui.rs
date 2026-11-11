@@ -8,8 +8,8 @@ use gpui_kit::component::{
     v_flex,
 };
 use gpui_kit::{
-    App, AppContext, Context, Div, Entity, InteractiveElement, IntoElement, ParentElement,
-    SharedString, Stateful, Styled, Window, actions, div,
+    Action, App, AppContext, ClickEvent, Context, Div, Entity, InteractiveElement, IntoElement,
+    ParentElement, SharedString, Stateful, Styled, Window, actions, div,
 };
 
 pub(crate) struct Controller {
@@ -58,6 +58,12 @@ impl Controller {
 }
 pub(crate) fn send(controller: &Entity<Controller>, command: Command, cx: &mut App) {
     controller.update(cx, |c, cx| c.send(command, cx));
+}
+/// Click handler that dispatches `action` through the window delivering the
+/// click. GPUI holds that window during the click, so `App::dispatch_action`
+/// would fail to re-enter it and silently drop the action.
+pub(crate) fn dispatch(action: impl Action) -> impl Fn(&ClickEvent, &mut Window, &mut App) {
+    move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx)
 }
 pub(crate) fn input(label: &'static str, window: &mut Window, cx: &mut App) -> Entity<InputState> {
     cx.new(|cx| InputState::new(window, cx).placeholder(label))
