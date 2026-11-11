@@ -6,6 +6,7 @@ mod backend;
 mod codes;
 mod dashboard;
 mod history;
+mod mark;
 mod platform;
 mod settings;
 #[cfg(test)]

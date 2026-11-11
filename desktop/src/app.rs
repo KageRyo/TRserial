@@ -343,21 +343,7 @@ fn menu(cx: &mut App) -> Vec<MenuItem> {
     ]
 }
 fn icon() -> gpui_tray::Result<Icon> {
-    // Original bitmap mark for native tray APIs; no game assets are bundled.
-    let mut rgba = vec![0; 32 * 32 * 4];
-    for y in 2..30 {
-        for x in 2..30 {
-            let i = (y * 32 + x) * 4;
-            let t = (7..25).contains(&x) && (8..13).contains(&y)
-                || (13..19).contains(&x) && (8..25).contains(&y);
-            rgba[i..i + 4].copy_from_slice(if t {
-                &[255, 255, 255, 255]
-            } else {
-                &[37, 99, 235, 255]
-            });
-        }
-    }
-    Icon::from_rgba(rgba, 32, 32).build()
+    Icon::from_rgba(crate::mark::rgba(32), 32, 32).build()
 }
 
 fn synchronize(snapshot: &crate::backend::Presentation, cx: &mut App) -> bool {
