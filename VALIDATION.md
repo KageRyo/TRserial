@@ -60,3 +60,51 @@ Ubuntu 與 Windows 的 CI 結果見 [GitHub Actions](https://github.com/KageRyo/
 在全新資料目錄新增測試帳號、匯入範例並 dry run 後，工作與嘗試紀錄皆為零。另用 managed driver 執行 `browser-check`，官方表單的五個定位與驗證控制項皆可讀取；檢查後 Chrome 與受管理的 ChromeDriver 已結束。
 
 以 `ss` 確認 ChromeDriver 預設只監聽 `127.0.0.1` 與 `::1`。managed 模式採用這個預設，不傳入會改為全介面監聽的 `--allowed-ips`。
+
+## 原生桌面版
+
+GUI 分支從已合併的 PR #1（`bee7492`）開始。使用 GPUI Kit `0.9.0`、GPUI `0.3.11` 與 gpui-tray `0.3.0`，依賴鎖定於 `Cargo.lock`。未建立 tag、GitHub Release 或安裝包，Cargo 版本未變更。
+
+本機環境為 Linux x86_64／WSL2、Rust／Cargo 1.97.1。GUI 使用 WSLg X11 與 Mesa 軟體 Vulkan 實際開窗，五個頁面另以 GPUI 原生 renderer 檢查明暗主題與繁體中文字型。建置所需函式庫與字型解開於使用者 cache，未修改系統套件。
+
+| 本機檢查 | 結果 |
+| --- | --- |
+| `cargo fmt --all --check` | 通過 |
+| `cargo clippy --locked --all-targets --all-features -- -D warnings` | 通過，CLI 不使用 GUI 建置環境 |
+| `cargo test --locked --all-features` | 37 項通過，2 項瀏覽器測試另外執行 |
+| `cargo test --locked --test browser_flow -- --ignored` | 2 項通過，Chrome／ChromeDriver 157.0.8103.38，本機假網站 |
+| `cargo build --locked --release` | 通過 |
+| `cargo clippy --locked -p trserial-desktop --all-targets --all-features -- -D warnings` | 通過 |
+| `cargo test --locked -p trserial-desktop -- --include-ignored` | 11 項通過，含原生繪製與系統匣 |
+| `cargo build --locked --release -p trserial-desktop` | 通過 |
+
+### 自動化涵蓋範圍
+
+- Core：保留既有 CLI、瀏覽器與持久化測試；新增手動多帳號／歷史確認、帳號停用再啟用、重新加入的歷史基準、別名與紀錄識別、設定驗證、mock 隔離及人工重試。
+- GUI：鍵盤填寫帳號表單、密碼欄位遮罩與資料庫不含密碼、候選批准後更新表格、mock 兌換停用、依識別碼保留表格選取、確認訊息只消費一次、重新讀取嘗試紀錄、背景啟停、重啟後不重送未知結果，以及單一實例鎖。
+- Linux 原生程序：獨立 D-Bus fixture 接收真正的 StatusNotifierItem 註冊，呼叫 Activate 還原視窗，檢查隱藏時背景仍在執行、結束後鎖可取得及嘗試紀錄為零。另測試沒有可用 host 時保留主視窗。
+- GUI `--smoke-test`：全新資料目錄、測試帳號、mock 訊息、五頁實際繪製、導覽不增加視窗、啟動／暫停／停止與正常結束。未完成測試時回傳失敗。
+
+GUI CI 在 Ubuntu 與 Windows 分別執行嚴格 Clippy、一般測試、原生程序 smoke test 與最佳化編譯。CLI 的 Windows／Linux 測試與本機假網站瀏覽器整合測試保留。一般 CLI 建置不需 GUI 系統函式庫。
+
+### GitHub Actions 結果
+
+2026-11-07，PR #2 提交 `43af45a` 由 push 與 pull_request 各觸發一次 CI，兩次全部通過。SonarCloud 新增問題為 0。
+
+| 項目 | 結果 |
+| --- | --- |
+| `rust`（Ubuntu／Windows） | 嚴格 Clippy、37 項一般測試、2 項本機假網站瀏覽器測試、全功能測試與 release build 通過 |
+| `desktop`（Ubuntu） | 9 項 GUI 測試通過。`native_tray` 在 Xvfb 與測試用 D-Bus 上完成 StatusNotifierItem 註冊、以 Activate 還原視窗，沒有 host 時保留主視窗 |
+| `desktop`（Windows） | 9 項 GUI 測試通過。原生 smoke test 偵測到系統匣後收起視窗，確認背景工作持續，再以顯示動作還原；五頁繪製、背景啟停與正常結束也完成 |
+
+`capture_all_pages_with_native_renderer` 需要實際 Vulkan renderer，CI 不執行，只在本機檢查。Windows 的系統匣點擊與選單沒有自動化，列在下方實機驗收。
+
+### 桌面實機驗收
+
+| 平台／功能 | 驗收內容 |
+| --- | --- |
+| Windows 10／11 桌面 | Credential Manager 新增／更新／移除、Toast、系統匣點擊與選單、登入啟動、顯示縮放 |
+| Ubuntu 桌面 | 已解鎖的 Secret Service、通知、GNOME／KDE 系統匣、登入啟動與 Wayland |
+| 官方網站 | 單一真實帳號與有效序號、人工 Cloudflare 驗證、網站回應與遊戲內結果 |
+
+開發與自動測試只使用假帳號及本機假網站，沒有執行正式兌換。桌面 Discord 監聽顯示未設定，Token 與頻道編輯介面尚未提供；選用 CLI 整合保留。Linux 收起視窗後會重新建立頁面，未儲存的表單內容不保留；Windows 原生隱藏會保留頁面。表格採虛擬化顯示，目前快照會讀取完整歷史，尚未驗證大量長期紀錄的效能。
