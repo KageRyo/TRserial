@@ -271,8 +271,12 @@ async fn only_pre_submit_transient_errors_retry_with_bound() {
         ]),
         ..Default::default()
     };
+    // Timestamps have one-second resolution, so a 1 s backoff becomes due
+    // whenever the two sweeps straddle a second boundary. An hour keeps the
+    // retry pending until the test advances it explicitly.
     let c = Config {
         max_attempts: 2,
+        retry_base_seconds: 3600,
         ..config()
     };
     let n = Arc::new(Notices::default());
